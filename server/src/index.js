@@ -56,6 +56,7 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import { checkpointHealth } from './checkpoint-health.js';
+import { layoutAgyHome, startAgyMigration, stateLinkHealth } from './state-links.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -1605,7 +1606,7 @@ const NON_SECRET = new Set([
   'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
   'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
   'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
-  'FX_LIVE', 'FX_DURABLE', 'ANTIGRAVITY_LIVE', 'ANTIGRAVITY_DURABLE',
+  'FX_LIVE', 'FX_DURABLE', 'ANTIGRAVITY_LIVE', 'ANTIGRAVITY_DURABLE', 'AGY_HOME',
   'AGENT_STATE_SCRIPT', 'AGENT_STATE_CHECKPOINT_SECONDS', 'DATA_DIR',
   'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
@@ -1704,6 +1705,10 @@ api.get('/api/info', (_req, res) => res.json({
   // is being saved, otherwise the adapters that are not and why. Read from
   // local status files. Withheld while locked: the reason names file paths.
   checkpoint: isLocked() ? null : checkpointHealth(),
+  // CLI state links (state-links.js): null while each is a link to local
+  // disk, otherwise the ones that are not — e.g. Antigravity's SQLite on the
+  // bucket. Withheld while locked: it names file paths.
+  stateLinks: isLocked() ? null : stateLinkHealth(),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -4241,12 +4246,19 @@ startStallProfiler();
 // happens here, synchronously; the decision itself waits for the trace digests
 // it judges "recent" with.
 runstate.init();
+// Antigravity runs with HOME on local disk (agy-home.js): lay it out now, then
+// move a real ~/.gemini/antigravity-cli or config left on the bucket by an agy
+// started some other way into the live tree — once, in the background, and
+// before any pane is revived (it is deferred while any agy runs).
+try { layoutAgyHome({ reason: 'server start' }); } catch (e) { console.error('[agy-home]', e && e.message); }
+// Retried every 5 minutes while deferred (an agy was running).
+const agyMigrated = startAgyMigration({ reason: 'server start' }).catch(() => 'failed');
 setTimeout(() => {
   // A locked Space serves no terminals, so it starts nothing — but it still
   // records what's running, so the snapshot stays true for the next boot. The
   // decision waits for the first (bounded) privacy verdict rather than reading
   // the fail-closed `checking` state as a reason not to revive.
-  firstVerdict.then(() => {
+  Promise.all([firstVerdict, agyMigrated]).then(() => {
     const done = isLocked()
       ? Promise.resolve([])
       : runstate.reviveOnBoot({

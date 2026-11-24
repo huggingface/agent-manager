@@ -23,3 +23,4 @@ _am_pwd() {
 # palette, bold cyan user + bold green location, readable on both light and
 # dark backgrounds. $(_am_pwd) is single-quoted so it re-evaluates per prompt.
 PS1='\[\e[1;36m\]'"${AM_USER}"'\[\e[0;2m\]/\[\e[0m\]\[\e[1;32m\]$(_am_pwd)\[\e[0;2m\] \$\[\e[0m\] '
+

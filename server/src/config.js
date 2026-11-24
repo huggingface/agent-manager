@@ -1,3 +1,4 @@
+import { agyHomeDir } from './agy-home.js';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -240,7 +241,13 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 // Expanded by the launching shell, so it follows the key present at launch.
 const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemini"}'}`;
-export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
+// With HOME on local disk wherever there is one (agy-home.js): agy keeps its
+// SQLite under $HOME/.gemini, and HOME=/data/home is the bucket.
+const agyEnv = () => {
+  const home = agyHomeDir(process.env);
+  return home ? `env HOME='${home.replace(/'/g, `'\\''`)}' ` : '';
+};
+export const agyCommand = (tail = '') => `${agyEnv()}agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 const GEMINI_DEPRECATED = 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI. '
