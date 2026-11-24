@@ -187,7 +187,8 @@ A session is a *query*, not a file.
 ### Antigravity CLI — **SQLite per conversation**, `~/.gemini/antigravity-cli/conversations/<uuid>.db`
 - `steps(idx, step_type, status, step_payload, …)`: one row per trajectory step, the step a
   protobuf (`exa.cortex_pb.CortexStep`) with no published schema. The field numbers in
-  `server/src/antigravity.js` come from the descriptors embedded in the `agy` 1.4.10 binary.
+  `server/src/antigravity.js` come from the descriptors embedded in the `agy` 1.4.10 binary. The image now installs the
+  newest `agy` at build time, so recheck them against the installed binary if steps stop parsing.
 - Step types read: 14 user input (the prompt), 15 planner response (answer text, thinking,
   tool calls), 132 generic (every tool's result, answering a call by id), 17 error. 101 system
   messages (notices agy writes for the model) and bookkeeping steps are skipped. Statuses
