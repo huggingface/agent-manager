@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PR 250 Diagram</title>
+<style>
+  /* ---------- fonts (files in ./fonts, copied from the skill's assets/fonts) ---------- */
+  /* Leroy-template lettering for every drawing label. */
+  @font-face { font-family: "Routed Gothic"; src: url("fonts/routed-gothic.ttf"); unicode-range: U+0000-0030, U+0032-FFFF; }
+  @font-face { font-family: "Routed Gothic Narrow"; src: url("fonts/routed-gothic-narrow.ttf"); unicode-range: U+0000-0030, U+0032-FFFF; }
+  /* Leroy's plain "1" reads as "I" (API V1, T1). Borrow a flagged one. Delete these two
+     rules for a strictly period look on pages without versions or subscripts. */
+  @font-face { font-family: "Routed Gothic"; src: local("Helvetica Neue"), local("HelveticaNeue"), local("Arial"); unicode-range: U+0031; }
+  @font-face { font-family: "Routed Gothic Narrow"; src: local("Helvetica Neue"), local("HelveticaNeue"), local("Arial"); unicode-range: U+0031; }
+  /* IBM Selectric Letter Gothic: crew checklists only. */
+  @font-face { font-family: "Letter Gothic"; src: url("fonts/LetterGothicCode-R.ttf"); font-weight: 400; }
+  @font-face { font-family: "Letter Gothic"; src: url("fonts/LetterGothicCode-B.ttf"); font-weight: 700; }
+
+  @page { size: A4; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #8a8a86; }
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @media print { html, body { background: none; } }
+
+  :root {
+    --ink: #000000;
+    --paper: #fbfaf5;   /* screen only; print is pure white (below) */
+    --type: "Iowan Old Style", "Iowan", Georgia, serif;
+    --leroy: "Routed Gothic Narrow", "Routed Gothic", sans-serif;
+    --selectric: "Letter Gothic", "Courier", monospace;
+  }
+  /* Must come after :root. A printed off-white tint is halftoned into dots. */
+  @media print { :root { --paper: #ffffff; } }
+
+  .page {
+    position: relative;
+    width: 210mm;
+    height: 297mm;
+    margin: 0 auto;
+    padding: 9mm 15mm 0 16mm;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--type);
+    font-size: 8pt;
+    line-height: 1.33;
+    letter-spacing: 0.055em;   /* the Selectric typewriter spacing */
+    overflow: hidden;
+  }
+
+  /* ---------- running head / foot ---------- */
+  .head { text-align: center; line-height: 1.25; }
+  .head .doc { font-weight: 700; font-size: 8.6pt; letter-spacing: 0.06em; }
+  .head .title { font-weight: 700; font-size: 8.6pt; letter-spacing: 0.08em; }
+  .head .part { margin-top: 2.2mm; font-size: 8.2pt; letter-spacing: 0.1em; }
+  .rule { height: 0; border-top: 1.5pt solid var(--ink); margin: 1.4mm -2mm 0; }
+
+  .foot { position: absolute; left: 16mm; right: 15mm; bottom: 8mm; }
+  .foot .rule { margin: 0 -2mm 1.6mm; }
+  .foot .sub { text-align: center; letter-spacing: 0.1em; font-size: 8.2pt; }
+  .foot .line { display: flex; align-items: baseline; justify-content: space-between; margin-top: 2.2mm; font-size: 8.2pt; }
+  .foot .fill { display: inline-block; border-bottom: 0.6pt solid var(--ink); text-align: center; padding: 0 1mm; font-size: 8.8pt; letter-spacing: 0.03em; }
+
+  /* ---------- section opener ---------- */
+  .opener { text-align: center; letter-spacing: 0.12em; margin: 3.4mm 0 2mm; line-height: 1.6; }
+
+  /* ---------- numbered paragraphs ---------- */
+  .para { display: grid; grid-template-columns: 19mm 1fr; position: relative; }
+  .para .num { letter-spacing: 0.08em; }
+  .para h2, .para h3 { margin: 0 0 0.8mm; font: inherit; font-weight: 400; letter-spacing: 0.08em; }
+  .para h3 { text-decoration: underline; text-underline-offset: 1.6pt; text-decoration-thickness: 0.5pt; letter-spacing: 0.06em; }
+  .para p { margin: 0 0 1mm; text-indent: 9mm; text-align: left; }
+  .para p.flush { text-indent: 0; }
+  .changebar { position: absolute; left: -9mm; width: 1.3mm; background: var(--ink); }
+  .nowrap { white-space: nowrap; }
+
+  /* ---------- figures ---------- */
+  figure { margin: 1.6mm 0 0; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { text-align: center; margin-top: 0.6mm; letter-spacing: 0.07em; }
+  figcaption .n { margin-right: 3mm; }
+
+  /* SVG units are millimetres on paper: a figure 180 units wide fills the 179 mm column. */
+  svg text { font-family: var(--leroy); fill: var(--ink); letter-spacing: 0.04px; }
+  svg .o    { fill: none; stroke: var(--ink); stroke-width: 0.42; stroke-linejoin: round; stroke-linecap: round; } /* object line */
+  svg .of   { fill: var(--paper); stroke: var(--ink); stroke-width: 0.42; stroke-linejoin: round; }               /* object, opaque */
+  svg .t    { fill: none; stroke: var(--ink); stroke-width: 0.17; stroke-linecap: round; }                        /* thin detail */
+  svg .hid  { fill: none; stroke: var(--ink); stroke-width: 0.22; stroke-dasharray: 1.3 0.7; }                     /* hidden */
+  svg .cl   { fill: none; stroke: var(--ink); stroke-width: 0.16; stroke-dasharray: 5 0.8 0.9 0.8; }               /* centerline */
+  svg .cut  { fill: none; stroke: var(--ink); stroke-width: 0.5; stroke-dasharray: 5 1 1 1; }                      /* section cut */
+  svg .ld   { fill: none; stroke: var(--ink); stroke-width: 0.16; marker-end: url(#nh-leader); }                   /* leader */
+  svg .dim  { fill: none; stroke: var(--ink); stroke-width: 0.16; marker-start: url(#nh-dim); }                    /* dimension half */
+  svg .w    { fill: none; stroke: var(--ink); stroke-width: 0.3; stroke-linejoin: round; }                         /* wire */
+  svg .wa   { fill: none; stroke: var(--ink); stroke-width: 0.3; stroke-linejoin: round; marker-end: url(#nh-arrow); } /* wire with arrow */
+  svg .box  { fill: var(--paper); stroke: var(--ink); stroke-width: 0.45; }
+  svg .panel{ fill: none; stroke: var(--ink); stroke-width: 0.3; stroke-dasharray: 2 1; }
+  svg .ev   { fill: none; stroke: var(--ink); stroke-width: 0.18; stroke-dasharray: 1 0.7; }                       /* timeline event */
+  svg .vid  { fill: url(#nh-hatch); stroke: var(--ink); stroke-width: 0.35; }                                      /* hatched bar */
+  svg .aud  { fill: var(--paper); stroke: var(--ink); stroke-width: 0.35; }                                        /* plain bar */
+  svg .gap  { fill: var(--paper); stroke: var(--ink); stroke-width: 0.35; stroke-dasharray: 0.6 0.5; }             /* dotted bar */
+  svg .grain{ fill: url(#nh-dots); stroke: var(--ink); stroke-width: 0.35; }                                       /* granular, powder, fill */
+  svg .dot  { fill: var(--ink); }
+  svg .lbl   { font-size: 2.35px; }                                         /* callouts, box titles */
+  svg .lbl-s { font-size: 2.05px; }                                         /* secondary lines, wire names */
+  svg .lbl-b { font-size: 2.5px; font-family: "Routed Gothic", sans-serif; } /* view titles, big letters */
+  svg .code  { font-size: 2.4px; font-family: "Routed Gothic", sans-serif; } /* figure code, bottom right */
+
+  /* ---------- lower band: data table + notice + checklist ---------- */
+  .lower { display: grid; grid-template-columns: 1fr 64mm; column-gap: 6mm; margin-top: 2.8mm; }
+  .tcap { text-align: center; letter-spacing: 0.07em; margin: 0 0 0.8mm; }
+  table { width: 100%; border-collapse: collapse; font-size: 7.3pt; line-height: 1.2; }
+  th, td { border: 0.6pt solid var(--ink); padding: 0.35mm 1.6mm; text-align: left; vertical-align: top; font-weight: 400; }
+  thead th { text-align: center; letter-spacing: 0.1em; padding: 0.5mm 1.6mm; }
+  td.v { white-space: nowrap; }
+
+  .notice { text-align: left; margin-bottom: 1.8mm; }
+  .notice .tag { display: block; text-align: center; letter-spacing: 0.18em; font-weight: 700; text-decoration: underline; text-underline-offset: 1.6pt; text-decoration-thickness: 0.6pt; margin-bottom: 0.8mm; }
+  .notice p { margin: 0; font-size: 7.4pt; line-height: 1.28; }
+
+  .card { border: 0.8pt solid var(--ink); font-family: var(--selectric); font-size: 7.1pt; line-height: 1.3; letter-spacing: 0; }
+  .card .bar { background: var(--ink); color: var(--paper); font-weight: 700; padding: 0.5mm 1.8mm; display: flex; justify-content: space-between; }
+  .card ol { list-style: none; margin: 0; padding: 0.8mm 1.8mm 1mm; }
+  .card li { display: grid; grid-template-columns: 3.2mm 1fr; white-space: pre; }
+
+  /* black thumb tab, bleeds off the trim edge */
+  .tab { position: absolute; right: 0; top: 112mm; width: 8.5mm; height: 17mm; background: var(--ink); color: var(--paper);
+    font-family: "Routed Gothic", sans-serif; font-size: 8pt; letter-spacing: 0.08em; display: flex; align-items: center; justify-content: center; }
+
+  html, body { background: #fff; } :root { --paper: #ffffff; }
+  .ttag { background:#000; color:#fff; padding:0 1.4mm; }
+  svg .bt { fill: var(--paper); stroke: var(--ink); stroke-width: 0.25; }
+  svg .bh { fill: var(--paper); stroke: var(--ink); stroke-width: 0.5; }
+  svg .wh { fill: none; stroke: var(--ink); stroke-width: 0.5; stroke-linejoin: round; marker-end: url(#nh-arrow); }
+  svg .wd { fill: none; stroke: var(--ink); stroke-width: 0.3; stroke-dasharray: 1.2 0.8; marker-end: url(#nh-arrow); }
+  svg .tg { font-size: 1.9px; fill: #fff; text-anchor: middle; font-family: "Routed Gothic", sans-serif; }
+  svg .co circle { fill: #fff; stroke: #000; stroke-width: 0.3; }
+  svg .co text { font-size: 2.1px; text-anchor: middle; font-family: "Routed Gothic", sans-serif; }
+  .foot .sub { font-size: 7.6pt; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+
+<!-- Shared drawing defs: every figure on the page uses these ids. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <marker id="nh-leader" viewBox="0 0 6 4" refX="5.6" refY="2" markerWidth="2.1" markerHeight="1.05" markerUnits="userSpaceOnUse" orient="auto" preserveAspectRatio="none"><path d="M0,0 L6,2 L0,4 Z" fill="#000"/></marker>
+    <marker id="nh-arrow" viewBox="0 0 6 4" refX="5.6" refY="2" markerWidth="2.4" markerHeight="1.3" markerUnits="userSpaceOnUse" orient="auto" preserveAspectRatio="none"><path d="M0,0 L6,2 L0,4 Z" fill="#000"/></marker>
+    <marker id="nh-dim" viewBox="0 0 6 4" refX="0" refY="2" markerWidth="2.2" markerHeight="0.95" markerUnits="userSpaceOnUse" orient="auto" preserveAspectRatio="none"><path d="M6,0 L0,2 L6,4 Z" fill="#000"/></marker>
+    <pattern id="nh-hatch" width="1.1" height="1.1" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="1.1" stroke="#000" stroke-width="0.2"/></pattern>
+    <pattern id="nh-bp" width="1.4" height="1.4" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="0.7" height="1.4" fill="#000"/></pattern>
+    <pattern id="nh-dots" width="1.3" height="1.3" patternUnits="userSpaceOnUse"><circle cx="0.32" cy="0.32" r="0.15" fill="#000"/><circle cx="0.97" cy="0.97" r="0.15" fill="#000"/></pattern>
+  </defs>
+</svg>
+
+<div class="page">
+
+  <header class="head">
+    <div class="doc">AGENT MANAGER - PR #250 - <span class="ttag">BUG FIX</span></div>
+    <div class="title">ANTIGRAVITY: REPAIR ~/.GEMINI LINKS BEFORE LAUNCH, KEEP SQLITE OFF THE BUCKET, WARN WHEN THEY BREAK</div>
+    <div class="rule"></div>
+  </header>
+
+  <div class="tab">AGY</div>
+
+  <section class="para" style="margin-top:3mm">
+    <div class="num">1</div>
+    <div>
+      <h2>INTRODUCTION.</h2>
+      <p>agy keeps its SQLite conversations under ~/.gemini/antigravity-cli and ~/.gemini/config, which the entrypoint links to local disk once, at boot. From 20 Nov 2026 both were real directories on the bucket (/data); agy wrote SQLite onto hf-mount and four conversations came back malformed. This PR puts the links back before every agy launch, at server start and every 30 s, and warns while one is broken (figure 1).</p>
+    </div>
+  </section>
+
+  <figure>
+    <svg viewBox="0 0 180 86" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Layout of the link repair">
+      <!-- regions -->
+      <rect class="panel" x="1.5" y="2.5" width="34" height="27"/>
+      <text class="lbl-s" x="3.4" y="5.6">BROWSER</text>
+      <rect class="panel" x="1.5" y="33.5" width="34" height="22"/>
+      <text class="lbl-s" x="3.4" y="36.6">PTY</text>
+      <rect class="panel" x="42" y="2.5" width="77" height="53"/>
+      <text class="lbl-s" x="43.9" y="5.6">SERVER (NODE) AND ITS CHILD SHELL</text>
+      <rect class="panel" x="123" y="2.5" width="55.5" height="47"/>
+      <text class="lbl-s" x="124.9" y="5.6">BUCKET /DATA (HF-MOUNT)</text>
+      <rect class="panel" x="123" y="53.5" width="55.5" height="29"/>
+      <text class="lbl-s" x="124.9" y="56.6">LOCAL DISK $AM_LOCAL</text>
+
+      <!-- browser -->
+      <rect class="bh" x="4" y="9" width="29" height="8"/>
+      <text class="lbl" x="18.5" y="12.4" text-anchor="middle">HEALTHBANNERS</text>
+      <text class="lbl-s" x="18.5" y="15.3" text-anchor="middle">LAZY CHUNK</text>
+      <g transform="translate(26.6 6.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">MOD</text></g>
+      <rect class="bh" x="4" y="20" width="29" height="8"/>
+      <text class="lbl" x="18.5" y="23.4" text-anchor="middle">STATELINKBANNER</text>
+      <text class="lbl-s" x="18.5" y="26.3" text-anchor="middle">"... ON THE BUCKET"</text>
+      <g transform="translate(26.6 17.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">NEW</text></g>
+      <line class="t" x1="18.5" y1="17" x2="18.5" y2="20"/>
+
+      <!-- pty -->
+      <rect class="bt" x="4" y="41" width="29" height="10"/>
+      <text class="lbl" x="18.5" y="45" text-anchor="middle">AGY CLI</text>
+      <text class="lbl-s" x="18.5" y="48.1" text-anchor="middle">WRITES ~/.GEMINI/...</text>
+
+      <!-- server -->
+      <rect class="bh" x="45" y="9" width="34" height="13"/>
+      <text class="lbl" x="62" y="13" text-anchor="middle">INDEX.JS</text>
+      <text class="lbl-s" x="62" y="16.2" text-anchor="middle">SERVER START, 30 S TIMER</text>
+      <text class="lbl-s" x="62" y="19" text-anchor="middle">/API/INFO STATELINKS</text>
+      <g transform="translate(72.6 6.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">MOD</text></g>
+      <rect class="bh" x="45" y="33" width="34" height="11"/>
+      <text class="lbl" x="62" y="37.4" text-anchor="middle">RUNNER.JS</text>
+      <text class="lbl-s" x="62" y="40.6" text-anchor="middle">ENSURERUNNING()</text>
+      <g transform="translate(72.6 30.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">MOD</text></g>
+      <rect class="bh" x="84" y="9" width="32" height="16"/>
+      <text class="lbl" x="100" y="13" text-anchor="middle">STATE-LINKS.JS</text>
+      <text class="lbl-s" x="100" y="16.2" text-anchor="middle">ENSUREANTIGRAVITYLINKS()</text>
+      <text class="lbl-s" x="100" y="19" text-anchor="middle">STATELINKHEALTH()</text>
+      <text class="lbl-s" x="100" y="21.8" text-anchor="middle">LSTAT ONLY WHEN FINE</text>
+      <g transform="translate(109.6 6.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">NEW</text></g>
+      <rect class="bh" x="84" y="35" width="32" height="14"/>
+      <text class="lbl" x="100" y="39" text-anchor="middle">AGENT-STATE.SH</text>
+      <text class="lbl-s" x="100" y="42.2" text-anchor="middle">RELINK-ANTIGRAVITY</text>
+      <text class="lbl-s" x="100" y="45" text-anchor="middle">EXIT 0 / 1 / 3</text>
+      <g transform="translate(109.6 32.8)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">NEW</text></g>
+
+      <!-- storage: bucket -->
+      <path class="bh" d="M127,11 L127,24 A8,1.8 0 0 0 143,24 L143,11"/>
+      <ellipse class="bh" cx="135" cy="11" rx="8" ry="1.8"/>
+      <text class="lbl" x="135" y="16" text-anchor="middle">~/.GEMINI/</text>
+      <text class="lbl-s" x="135" y="19" text-anchor="middle">ANTIGRAVITY-CLI</text>
+      <text class="lbl-s" x="135" y="21.6" text-anchor="middle">CONFIG (LINKS)</text>
+      <path class="bh" d="M155,11 L155,24 A10,1.8 0 0 0 175,24 L175,11"/>
+      <ellipse class="bh" cx="165" cy="11" rx="10" ry="1.8"/>
+      <text class="lbl" x="165" y="16" text-anchor="middle">&lt;PATH&gt;.BUCKET-</text>
+      <text class="lbl" x="165" y="19" text-anchor="middle">&lt;UTC TIME&gt;</text>
+      <text class="lbl-s" x="165" y="21.8" text-anchor="middle">MOVED ASIDE</text>
+      <g transform="translate(168.6 5.6)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">NEW</text></g>
+      <path class="bt" d="M147,35 L147,45 A10,1.8 0 0 0 167,45 L167,35"/>
+      <ellipse class="bt" cx="157" cy="35" rx="10" ry="1.8"/>
+      <text class="lbl" x="157" y="40" text-anchor="middle">AGENT-STATE.LOG</text>
+      <text class="lbl-s" x="157" y="42.8" text-anchor="middle">/DATA/STATE (#249)</text>
+
+      <!-- storage: local -->
+      <path class="bt" d="M126,62 L126,76 A10,1.8 0 0 0 146,76 L146,62"/>
+      <ellipse class="bt" cx="136" cy="62" rx="10" ry="1.8"/>
+      <text class="lbl" x="136" y="67" text-anchor="middle">ANTIGRAVITY-HOME</text>
+      <text class="lbl-s" x="136" y="70" text-anchor="middle">$ANTIGRAVITY_LIVE</text>
+      <text class="lbl-s" x="136" y="72.8" text-anchor="middle">SQLITE + WAL</text>
+      <path class="bh" d="M154,62 L154,76 A11,1.8 0 0 0 176,76 L176,62"/>
+      <ellipse class="bh" cx="165" cy="62" rx="11" ry="1.8"/>
+      <text class="lbl" x="165" y="67" text-anchor="middle">AGENT-STATE-</text>
+      <text class="lbl" x="165" y="70" text-anchor="middle">REPLACED</text>
+      <text class="lbl-s" x="165" y="72.8" text-anchor="middle">OLDER LIVE PAIRS</text>
+      <g transform="translate(169.6 56.6)"><rect width="6.4" height="2.6" fill="#000"/><text class="tg" x="3.2" y="2">NEW</text></g>
+
+      <!-- flows -->
+      <!-- poll /api/info -->
+      <polyline class="wd" points="45,15.5 35.6,15.5 33.6,15.5"/>
+      <text class="lbl-s" x="36.8" y="14.3" style="font-size:1.9px">POLL</text>
+      <!-- index -> state-links -->
+      <line class="wh" x1="79" y1="15.5" x2="83.4" y2="15.5"/>
+      <!-- runner -> state-links -->
+      <polyline class="wh" points="79,38.5 81.5,38.5 81.5,27 87,27 87,25.6"/>
+      <text class="lbl-s" x="57.6" y="48.2">BEFORE EACH AGY LAUNCH</text>
+      <!-- runner -> agy spawn -->
+      <polyline class="wa" points="45,46 40,46 33.6,46"/>
+      <text class="lbl-s" x="36.2" y="44.8" style="font-size:1.9px">SPAWN</text>
+      <!-- state-links -> script -->
+      <line class="wh" x1="100" y1="25" x2="100" y2="34.4"/>
+      <text class="lbl-s" x="101.2" y="30.6">SPAWNSYNC</text>
+      <!-- state-links -> lstat ~/.gemini -->
+      <line class="wh" x1="116" y1="13.5" x2="126.4" y2="13.5"/>
+      <text class="lbl-s" x="116.6" y="12.4" style="font-size:1.9px">LSTAT</text>
+      <!-- script -> bucket: mv aside, ln -s -->
+      <polyline class="wh" points="116,38 121,38 121,28.4 131,28.4 131,26.4"/>
+      <text class="lbl-s" x="124.4" y="31.2">LN -S</text>
+      <polyline class="wh" points="121,28.4 160,28.4 160,26.4"/>
+      <text class="lbl-s" x="145.4" y="27.4">MV ASIDE</text>
+      <!-- script -> log -->
+      <polyline class="wh" points="116,45 120,45 120,39.6 146.4,39.6"/>
+      <text class="lbl-s" x="128" y="38.6">"RELINK:" LINE</text>
+      <!-- script -> live merge -->
+      <polyline class="wh" points="108,49 108,66 125.4,66"/>
+      <text class="lbl-s" x="109.4" y="58.6">MERGE,</text>
+      <text class="lbl-s" x="109.4" y="61.2">NEWER WINS,</text>
+      <text class="lbl-s" x="109.4" y="63.8">.DB + -WAL</text>
+      <!-- live -> replaced -->
+      <line class="wh" x1="146" y1="69" x2="153.4" y2="69"/>
+      <!-- agy -> live via links -->
+      <polyline class="wa" points="18.5,51 18.5,79 136,79 136,78.4"/>
+      <text class="lbl-s" x="22" y="78">AGY OPENS ITS SQLITE THROUGH THE ~/.GEMINI LINKS</text>
+      <!-- link drum -> live: symlink -->
+      <!-- failure event -->
+
+      <!-- callouts -->
+      <g class="co"><circle cx="85.4" cy="5.8" r="1.6"/><text x="85.4" y="6.6">1</text></g>
+      <g class="co"><circle cx="46.6" cy="30" r="1.6"/><text x="46.6" y="30.8">2</text></g>
+      <g class="co"><circle cx="85.4" cy="31.8" r="1.6"/><text x="85.4" y="32.6">3</text></g>
+      <g class="co"><circle cx="156.4" cy="8" r="1.6"/><text x="156.4" y="8.8">4</text></g>
+      <g class="co"><circle cx="5.6" cy="18.6" r="1.6"/><text x="5.6" y="19.4">5</text></g>
+      <g class="co"><circle cx="125.8" cy="11" r="1.6"/><text x="125.8" y="11.8">6</text></g>
+      <text class="lbl-s" x="124.6" y="48.2">(6) HF-MOUNT CAN DROP A LINK; AGY MKDIRS</text>
+
+      <!-- legend -->
+      <g transform="translate(43 59)">
+        <text class="lbl-s" x="0" y="0">LEGEND</text>
+        <rect class="bt" x="0" y="1.6" width="5" height="2.6"/><text class="lbl-s" x="6.4" y="3.8">EXISTED</text>
+        <rect class="bh" x="0" y="5.6" width="5" height="2.6"/><text class="lbl-s" x="6.4" y="7.8">NEW / MOD (TAG)</text>
+        <path class="bt" d="M1,10 L1,12.6 A1.5,0.5 0 0 0 4,12.6 L4,10"/><ellipse class="bt" cx="2.5" cy="10" rx="1.5" ry="0.5"/><text class="lbl-s" x="6.4" y="12.2">STORAGE</text>
+        <line class="wa" x1="30" y1="3" x2="38" y2="3"/><text class="lbl-s" x="39.4" y="3.8">FLOW, EXISTING</text>
+        <line class="wh" x1="30" y1="7" x2="38" y2="7"/><text class="lbl-s" x="39.4" y="7.8">FLOW, NEW</text>
+        <line class="wd" x1="30" y1="11" x2="38" y2="11"/><text class="lbl-s" x="39.4" y="11.8">EVENT, POLL</text>
+      </g>
+
+      <text class="code" x="178.6" y="85.4" text-anchor="end">AGY-501A</text>
+    </svg>
+    <figcaption><span class="n">Figure 1.</span>Link Check, Repair and Warning Paths</figcaption>
+  </figure>
+
+  <section class="para" style="margin-top:2mm">
+    <div class="num">2</div>
+    <div>
+      <h2>HOW IT WORKS.</h2>
+      <p>(1) state-links.js lstat's every CLI state link; when Antigravity's are fine that is all it costs. (2) runner.js calls it before each agy launch or resume; index.js at server start and every 30 s. (3) A broken link runs agent-state.sh relink-antigravity. (4) A real directory is merged into local disk, moved aside, never deleted, and linked again. (5) /api/info.stateLinks feeds the banner. (6) The suspected cause: hf-mount dropped the hand-repaired ~/.gemini/config link within minutes on 24 Nov; agy then mkdirs a real directory on the bucket.</p>
+    </div>
+  </section>
+  <section class="para">
+    <div class="changebar" style="top:0.4mm; height:6.8mm"></div>
+    <div class="num">2.1</div>
+    <div>
+      <h3>Never under a running agy.</h3>
+      <p class="flush">An agy process with this HOME, or any process with a file or cwd in the directory, defers the repair: nothing moves, the log says DEFERRED, and the next launch retries (figure 2).</p>
+    </div>
+  </section>
+
+  <figure>
+    <svg viewBox="0 0 180 44" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Decision per path and the database pair rule">
+      <rect class="bt" x="1" y="3" width="26" height="7"/>
+      <text class="lbl" x="14" y="7.3" text-anchor="middle">LSTAT PATH</text>
+      <line class="wa" x1="27" y1="6.5" x2="31.6" y2="6.5"/>
+      <rect class="bt" x="32" y="3" width="20" height="7"/>
+      <text class="lbl" x="42" y="7.3" text-anchor="middle">A LINK?</text>
+      <line class="wa" x1="52" y1="6.5" x2="61.6" y2="6.5"/>
+      <text class="lbl-s" x="53.4" y="5.5">YES</text>
+      <rect class="bt" x="62" y="3" width="54" height="7"/>
+      <text class="lbl-s" x="89" y="7.2" text-anchor="middle">LEAVE IT (ELSEWHERE: REPORT ONLY)</text>
+      <line class="wa" x1="42" y1="10" x2="42" y2="13.6"/>
+      <text class="lbl-s" x="43.2" y="12.6">NO</text>
+      <rect class="bt" x="32" y="14" width="20" height="7"/>
+      <text class="lbl" x="42" y="18.3" text-anchor="middle">MISSING?</text>
+      <line class="wh" x1="52" y1="17.5" x2="61.6" y2="17.5"/>
+      <text class="lbl-s" x="53.4" y="16.5">YES</text>
+      <rect class="bh" x="62" y="14" width="54" height="7"/>
+      <text class="lbl-s" x="89" y="18.2" text-anchor="middle">LN -S (ALSO THE 30 S WATCHER)</text>
+      <line class="wa" x1="42" y1="21" x2="42" y2="24.6"/>
+      <text class="lbl-s" x="43.2" y="23.6">DIR</text>
+      <rect class="bh" x="22" y="25" width="40" height="7"/>
+      <text class="lbl-s" x="42" y="29.2" text-anchor="middle">AGY RUNNING OR DIR OPEN?</text>
+      <line class="wh" x1="62" y1="28.5" x2="71.6" y2="28.5"/>
+      <text class="lbl-s" x="63.4" y="27.5">YES</text>
+      <rect class="bh" x="72" y="25" width="44" height="7"/>
+      <text class="lbl-s" x="94" y="29.2" text-anchor="middle">DEFERRED - EXIT 3 - BANNER</text>
+      <line style="stroke:#000;stroke-width:0.5" x1="42" y1="32" x2="42" y2="34.8"/>
+      <text class="lbl-s" x="43.2" y="33.9">NO</text>
+      <rect class="bh" x="1" y="36" width="26" height="7"/>
+      <text class="lbl-s" x="14" y="40.2" text-anchor="middle">MERGE (DETAIL A)</text>
+      <rect class="bh" x="32" y="36" width="30" height="7"/>
+      <text class="lbl-s" x="47" y="40.2" text-anchor="middle">MV .BUCKET-&lt;UTC&gt;</text>
+      <rect class="bh" x="67" y="36" width="17" height="7"/>
+      <text class="lbl-s" x="75.5" y="40.2" text-anchor="middle">LN -S</text>
+      <rect class="bh" x="89" y="36" width="27" height="7"/>
+      <text class="lbl-s" x="102.5" y="40.2" text-anchor="middle">"RELINK:" LOG LINE</text>
+      <polyline class="wh" points="42,34.8 14,34.8 14,35.4"/>
+      <line class="wh" x1="27" y1="39.5" x2="31.4" y2="39.5"/>
+      <line class="wh" x1="62" y1="39.5" x2="66.4" y2="39.5"/>
+      <line class="wh" x1="84" y1="39.5" x2="88.4" y2="39.5"/>
+
+      <!-- detail A -->
+      <line class="t" x1="121" y1="0" x2="121" y2="44"/>
+      <text class="lbl-b" x="123.6" y="3">DETAIL A: DATABASE PAIRS</text>
+      <text class="lbl-s" x="124" y="7.4">BUCKET DIR</text>
+      <rect class="bt" x="124" y="9" width="19" height="4.6"/><text class="lbl-s" x="133.5" y="12.1" text-anchor="middle">A.DB</text>
+      <rect class="bt" x="124" y="14.6" width="19" height="4.6"/><text class="lbl-s" x="133.5" y="17.7" text-anchor="middle">A.DB-WAL</text>
+      <rect class="gap" x="124" y="20.2" width="19" height="4.6"/><text class="lbl-s" x="133.5" y="23.3" text-anchor="middle">A.DB-SHM</text>
+      <polyline class="w" points="122.6,9 122.6,19.2"/>
+      <text class="lbl-s" x="155" y="7.4">LIVE</text>
+      <rect class="bt" x="155" y="9" width="22" height="4.6"/><text class="lbl-s" x="166" y="12.1" text-anchor="middle">A.DB</text>
+      <rect class="bt" x="155" y="14.6" width="22" height="4.6"/><text class="lbl-s" x="166" y="17.7" text-anchor="middle">A.DB-WAL</text>
+      <line class="wh" x1="143" y1="14.2" x2="154.4" y2="14.2"/>
+      <text class="lbl-s" x="144" y="13.1" style="font-size:1.9px">AS A PAIR</text>
+      <text class="lbl-s" x="145" y="23.3">NEVER COPIED</text>
+      <text class="lbl-s" x="124" y="29.4">NEWER OF (.DB, -WAL) MTIME WINS.</text>
+      <text class="lbl-s" x="124" y="32.2">A .DB IS NEVER COPIED WITHOUT ITS -WAL.</text>
+      <text class="lbl-s" x="124" y="35">THE OLDER LIVE PAIR GOES TO</text>
+      <text class="lbl-s" x="124" y="37.8">AGENT-STATE-REPLACED: AN OLD WAL IS</text>
+      <text class="lbl-s" x="124" y="40.6">NEVER REPLAYED ONTO A NEWER .DB.</text>
+
+      <text class="code" x="178.6" y="43.6" text-anchor="end">AGY-502A</text>
+    </svg>
+    <figcaption><span class="n">Figure 2.</span>Per-Path Decision in relink-antigravity, and the Pair Rule</figcaption>
+  </figure>
+
+  <div class="lower">
+    <div>
+      <section class="para">
+        <div class="num">3</div>
+        <div><h2>DATA.</h2></div>
+      </section>
+      <div class="tcap">Table 1. Limits, Codes and Names</div>
+      <table>
+        <thead><tr><th>Item</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td>Missing-link watcher (WATCH_MS)</td><td class="v">30 s</td></tr>
+          <tr><td>Repair time limit (REPAIR_TIMEOUT_MS)</td><td class="v">180 s, then SIGKILL</td></tr>
+          <tr><td>Health cache under /api/info</td><td class="v">5 s</td></tr>
+          <tr><td>relink-antigravity exit codes</td><td class="v">0 ok - 1 failed - 3 deferred</td></tr>
+          <tr><td>Moved-aside directory name</td><td class="v">&lt;path&gt;.bucket-YYYYMMDDTHHMMSSZ</td></tr>
+          <tr><td>Links checked (general check)</td><td class="v">opencode, Hermes, fx, agy x2</td></tr>
+          <tr><td>Tests added (server + web)</td><td class="v">9 + 5; suite 204 passed</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <div class="notice">
+        <span class="tag">CAUTION</span>
+        <p>A deferred repair is not done. Until every Antigravity session is stopped and one is started again, agy keeps writing SQLite onto the bucket.</p>
+      </div>
+      <div class="card">
+        <div class="bar"><span>VERIFY LINKS</span><span>OPERATOR</span></div>
+        <ol>
+          <li><span>1</span><span>App - look for banner</span></li>
+          <li><span></span><span>√ "Antigravity state is on</span></li>
+          <li><span></span><span>   the bucket (link replaced)."</span></li>
+          <li><span>2</span><span>Antigravity panes - stop all</span></li>
+          <li><span>3</span><span>One Antigravity pane - start</span></li>
+          <li><span></span><span>√ Banner - gone</span></li>
+          <li><span>4</span><span>agent-state.log - "relink:"</span></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <div class="rule"></div>
+    <div class="sub">PR #250 - agy-links - opened 24 Nov 2026 - last commit 24 Nov 2026 - 1 commit, +728 / −7</div>
+  </footer>
+
+</div>
+
+
+<script>
+  // Fit check: room left between the last content block and the footer.
+  // .page hides overflow, so without this an overfull page fails silently.
+  // render.sh prints the result from <html data-fit>.
+  document.fonts.ready.then(() => {
+    const page = document.querySelector('.page')
+    const foot = page.querySelector('.foot')
+    let bottom = 0
+    for (const el of page.children) {
+      if (el === foot || el.classList.contains('tab')) continue
+      bottom = Math.max(bottom, el.getBoundingClientRect().bottom)
+    }
+    const free = (foot.getBoundingClientRect().top - bottom) * 25.4 / 96
+    document.documentElement.dataset.fit = free >= 0 ? `ok, ${free.toFixed(1)} mm free above the footer` : `OVERFLOW by ${(-free).toFixed(1)} mm`
+  })
+</script>
+</body>
+</html>
