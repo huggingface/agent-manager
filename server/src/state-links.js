@@ -6,30 +6,31 @@
 // ~/.fx, and Antigravity's ~/.gemini/antigravity-cli and ~/.gemini/config.
 //
 // On 2026-11-20 both Antigravity links were real directories on the bucket
-// again, in a Space that had been up since 11-16 (the entrypoint only checks at
-// boot). agy then wrote its SQLite databases straight onto hf-mount, whose
-// fsync is not durable; the checkpoint and the conversation lookup never saw
-// them, and four conversations came back 'database disk image is malformed'.
-// Nothing said so for four days.
+// again: agy wrote its SQLite onto hf-mount, whose fsync is not durable, and
+// four conversations came back malformed. A link on the bucket does not stay
+// put, so AM's agy no longer goes through it: it runs with HOME on local disk
+// (agy-home.js). What is left here:
 //
-// So: the links are looked at here — lstat only, cached, cheap enough for
-// /api/info — and reported while one is not the expected link. Antigravity's
-// are repaired before every agy launch and at server start
-// (`agent-state.sh relink-antigravity`), and never while agy runs: then the
-// repair is deferred, and the warning stays until a later launch makes it.
+//   - the check, lstat only and cached, for /api/info and the banner: every
+//     CLI's link, and the local $AGY_HOME/.gemini links agy now uses;
+//   - a ONE-TIME migration at server start of a real ~/.gemini/antigravity-cli
+//     or config on the bucket (written by an agy started some other way) into
+//     the live tree: `agent-state.sh relink-antigravity`, asynchronous, and
+//     only while no agy runs at all. Otherwise it is deferred to the next start
+//     and the banner says so.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { agyHomeDir } from './agy-home.js';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR } from './config.js';
 import { checkpointLogPath } from './checkpoint-health.js';
 
 const SCRIPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 const CACHE_MS = 5000;
-// A merge of a large tree off the bucket is slow (~27 ms a file), but it
-// happens once per breakage, and an agy launched before it ends would write to
-// the bucket again.
-const REPAIR_TIMEOUT_MS = 180_000;
+// A merge of a large tree off the bucket is slow (~27 ms a file). It runs in
+// the background; nothing waits on it but the revive of panes at boot.
+const REPAIR_TIMEOUT_MS = 600_000;
 
 /** The links entrypoint.sh makes, for the CLIs whose live directory is set. */
 export function expectedLinks(env = process.env) {
@@ -43,6 +44,13 @@ export function expectedLinks(env = process.env) {
   if (env.ANTIGRAVITY_LIVE) {
     add('antigravity', '.gemini/antigravity-cli', path.join(env.ANTIGRAVITY_LIVE, 'antigravity-cli'));
     add('antigravity', '.gemini/config', path.join(env.ANTIGRAVITY_LIVE, 'config'));
+    // The ones agy actually uses: on local disk, under its own HOME.
+    const agyHome = agyHomeDir(env);
+    if (agyHome) {
+      for (const n of ['antigravity-cli', 'config']) {
+        out.push({ cli: 'antigravity', link: path.join(agyHome, '.gemini', n), target: path.join(env.ANTIGRAVITY_LIVE, n), local: true });
+      }
+    }
   }
   return out;
 }
@@ -66,18 +74,18 @@ export function inspectLink({ link, target }) {
 const under = (p, root) => !!root && (p === root || p.startsWith(`${root.replace(/\/+$/, '')}/`));
 
 /**
- * null when every link is as entrypoint.sh made it. Otherwise
+ * null when every link is as entrypoint.sh / agy-home.js made it. Otherwise
  * `{ broken: [{ cli, link, target, kind, onBucket }], repair, log }`, where
- * `repair` is the last Antigravity repair this process ran that did not end
- * clean (`deferred` while agy was running, or `failed`), or null.
- * A missing link counts only for Antigravity: the others are made at boot and
- * nothing at all there is harmless until the CLI runs.
+ * `repair` is the last bucket migration that did not end clean (`deferred`
+ * while agy was running, or `failed`), or null.
+ * Missing counts only for agy's own local links: a missing link on the bucket
+ * is harmless until something writes there, and agy no longer does.
  */
 export function readStateLinkHealth({ env = process.env, dataDir = DATA_DIR } = {}) {
   const broken = [];
   for (const l of expectedLinks(env)) {
     const kind = inspectLink(l);
-    if (kind === 'ok' || (kind === 'missing' && l.cli !== 'antigravity')) continue;
+    if (kind === 'ok' || (kind === 'missing' && !l.local)) continue;
     broken.push({ ...l, kind, onBucket: under(l.link, dataDir) });
   }
   if (!broken.length) return null;
@@ -92,58 +100,42 @@ export function stateLinkHealth() {
 }
 
 let lastRepair = null;
+let migrating = 0;
+/** True while a migration may be writing into the live tree: no agy may start then. */
+export function agyMigrationRunning() { return migrating > 0; }
 /** Test seam: forget the last repair outcome and the cached health. */
 export function _reset() { lastRepair = null; cache = { at: 0, value: null }; }
 
 /**
- * Make ~/.gemini/{antigravity-cli,config} links again if either is not one.
- * Synchronous on purpose: it runs right before agy is spawned, and a launch
- * that went ahead first would write to the bucket. Costs two lstat calls when
- * nothing is wrong. Returns 'ok' | 'repaired' | 'deferred' | 'failed'.
+ * The one-time migration: if ~/.gemini/antigravity-cli or config on the bucket
+ * is a real directory, merge it into $ANTIGRAVITY_LIVE, move it aside and link
+ * it again (agent-state.sh relink-antigravity). Asynchronous. Resolves to
+ * 'ok' | 'repaired' | 'deferred' | 'failed'.
  */
-export function ensureAntigravityLinks({ env = process.env, reason = 'launch', missingOnly = false } = {}) {
-  const links = expectedLinks(env).filter((l) => l.cli === 'antigravity');
-  const kinds = links.map(inspectLink);
-  if (!links.length || kinds.every((k) => k === 'ok')) {
+export function migrateBucketAgyState({ env = process.env, reason = 'server start' } = {}) {
+  const bucket = expectedLinks(env).filter((l) => l.cli === 'antigravity' && !l.local);
+  if (!bucket.some((l) => ['dir', 'missing'].includes(inspectLink(l)))) {
     lastRepair = null;
-    return 'ok';
+    return Promise.resolve('ok');
   }
-  // A link pointing elsewhere is someone's deliberate choice: report, don't touch.
-  if (kinds.every((k) => k === 'ok' || k === 'other-link')) return 'ok';
-  if (missingOnly && !kinds.includes('missing')) return 'ok';
   const script = env.AGENT_STATE_SCRIPT || path.join(SCRIPTS_DIR, 'agent-state.sh');
-  const r = spawnSync('sh', [script, 'relink-antigravity'], {
-    env: missingOnly ? { ...env, AGENT_STATE_RELINK_MISSING_ONLY: '1' } : env,
-    encoding: 'utf8', timeout: REPAIR_TIMEOUT_MS, killSignal: 'SIGKILL',
+  migrating += 1;
+  return new Promise((resolve) => {
+    execFile('sh', [script, 'relink-antigravity'], { env, encoding: 'utf8', timeout: REPAIR_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 4 << 20 },
+      (err, stdout, stderr) => {
+        migrating -= 1;
+        const status = err ? (typeof err.code === 'number' ? err.code : null) : 0;
+        const said = `${stderr || ''}${stdout || ''}`.trim().split('\n').filter(Boolean).slice(-3).join(' | ');
+        cache = { at: 0, value: null };
+        if (status === 0) {
+          if (said) console.warn(`[state-links] ${reason}: ${said}`);
+          lastRepair = null;
+          return resolve(said ? 'repaired' : 'ok');
+        }
+        const outcome = status === 3 ? 'deferred' : 'failed';
+        lastRepair = { outcome, at: Date.now(), reason, detail: said || (err && err.message) || `exit ${status}` };
+        console.warn(`[state-links] ${reason}: Antigravity bucket migration ${outcome}: ${lastRepair.detail}`);
+        resolve(outcome);
+      });
   });
-  const said = `${r.stderr || ''}${r.stdout || ''}`.trim().split('\n').filter(Boolean).slice(-3).join(' | ');
-  cache = { at: 0, value: null };
-  if (r.status === 0) {
-    console.warn(`[state-links] ${reason}: Antigravity state was not linked to local disk; repaired. ${said}`);
-    lastRepair = null;
-    return 'repaired';
-  }
-  // The watcher leaves a directory to the next launch: not a failure of its own.
-  if (missingOnly && r.status === 3) return 'ok';
-  const outcome = r.status === 3 ? 'deferred' : 'failed';
-  lastRepair = { outcome, at: Date.now(), reason, detail: said || (r.error && r.error.message) || `exit ${r.status}` };
-  console.warn(`[state-links] ${reason}: Antigravity link repair ${outcome}: ${lastRepair.detail}`);
-  return outcome;
-}
-
-/**
- * hf-mount can drop a link under HOME on its own (see agent-state.sh
- * relink-antigravity), and agy's next start then makes a real directory on the
- * bucket in its place. Put a missing one back within WATCH_MS: two lstat calls
- * a tick, and making a link where nothing is moves no data, so it is safe while
- * agy runs. A real directory is left to the next launch.
- */
-export const WATCH_MS = 30_000;
-export function watchAntigravityLinks({ env = process.env, everyMs = WATCH_MS } = {}) {
-  if (!expectedLinks(env).some((l) => l.cli === 'antigravity')) return null;
-  const t = setInterval(() => {
-    try { ensureAntigravityLinks({ env, reason: 'watch', missingOnly: true }); } catch (e) { console.error('[state-links]', e && e.message); }
-  }, everyMs);
-  t.unref?.();
-  return t;
 }

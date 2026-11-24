@@ -23,3 +23,10 @@ _am_pwd() {
 # palette, bold cyan user + bold green location, readable on both light and
 # dark backgrounds. $(_am_pwd) is single-quoted so it re-evaluates per prompt.
 PS1='\[\e[1;36m\]'"${AM_USER}"'\[\e[0;2m\]/\[\e[0m\]\[\e[1;32m\]$(_am_pwd)\[\e[0;2m\] \$\[\e[0m\] '
+
+# Antigravity keeps its SQLite under $HOME/.gemini, and HOME is the bucket,
+# where SQLite corrupts. The manager runs agy with HOME on local disk
+# (server/src/agy-home.js, exported as AGY_HOME); an `agy` typed here does too.
+if [ -n "${AGY_HOME:-}" ]; then
+  agy() { HOME="$AGY_HOME" command agy "$@"; }
+fi

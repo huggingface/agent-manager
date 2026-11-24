@@ -42,7 +42,7 @@ test('nothing wrong renders nothing', () => {
 test('Antigravity state on the bucket is named, and when it gets repaired', () => {
   const html = render({ broken: [agy], repair: null, log });
   assert.match(html, /<b>Antigravity state is on the bucket \(link replaced\)\.<\/b>/);
-  assert.match(html, /repaired before the next Antigravity launch/);
+  assert.match(html, /moved to local disk at the next server start/);
   assert.match(html, /its databases can corrupt/);
   assert.match(html, /\/data\/home\/\.gemini\/antigravity-cli/);
   assert.match(html, /role="status"/);
@@ -56,8 +56,14 @@ test('both Antigravity links make one line', () => {
 
 test('a repair deferred because agy runs says what to do', () => {
   const html = render({ broken: [agy], repair: { outcome: 'deferred', at: 1, reason: 'launch x', detail: 'agy is running: pid 7: agy' }, log });
-  assert.match(html, /An agy session is running, so it was not moved/);
+  assert.match(html, /It was not moved because agy is running/);
   assert.match(html, /Last repair deferred: agy is running: pid 7/);
+});
+
+test("agy's own local HOME broken says new sessions will not start", () => {
+  const html = render({ broken: [{ cli: 'antigravity', link: '/l/agy-home/.gemini/config', target: '/l/x/config', kind: 'missing', onBucket: false, local: true }], repair: null, log });
+  assert.match(html, /<b>Antigravity(?:'|&#x27;)s local HOME is broken\.<\/b>/);
+  assert.match(html, /will not start until it is fixed/);
 });
 
 test('another CLI whose link became a directory is warned about too', () => {

@@ -14,8 +14,9 @@ import { cliById, cliVersion, isRemote, launchFlags, INTERNAL_HOST, PORT, STATE_
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
-import { AGY_ID, agyConversationForPid, agyWaitingStep, captureAgyConversation } from './antigravity.js';
-import { ensureAntigravityLinks } from './state-links.js';
+import { AGY_ID, agyConversationForPid, agyConversationPath, agyWaitingStep, captureAgyConversation } from './antigravity.js';
+import { prepareAgyHome } from './agy-home.js';
+import { agyMigrationRunning } from './state-links.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -2082,7 +2083,7 @@ export function commandFor(session) {
   // see scheduleAgyCapture), existence-checked in the shell like fx, so a
   // deleted conversation starts fresh rather than failing the launch.
   if (cli.id === 'antigravity' && session.everStarted && AGY_ID.test(session.antigravityConversationId || '')) {
-    const db = `"$HOME/.gemini/antigravity-cli/conversations/${session.antigravityConversationId}.db"`;
+    const db = shq(agyConversationPath(session.antigravityConversationId));
     return `if [ -f ${db} ]; then exec ${cli.resume(session.antigravityConversationId, f)}; else exec ${run}; fi`;
   }
 
@@ -2167,11 +2168,22 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     trustCodexWorkspace(realWork);
     dismissCodexUpdatePrompt(cliVersion('codex'));
   }
-  // agy keeps its SQLite databases under ~/.gemini, which must be links to
-  // local disk: HOME is on the bucket, and SQLite on hf-mount corrupts. Put
-  // them back before agy starts writing (state-links.js). While another agy
-  // runs, the repair is deferred and /api/info warns; the launch goes ahead.
-  if (session.cli === 'antigravity') ensureAntigravityLinks({ reason: `launch ${session.id}` });
+  // agy keeps its SQLite under $HOME/.gemini, and runs with HOME on local disk
+  // (agy-home.js): lay that HOME out again (an entry added to /data/home since
+  // shows up) and refuse to start agy on state that is not the local tree.
+  if (session.cli === 'antigravity') {
+    // The one-time move of bucket state into the live tree (state-links.js)
+    // checked that no agy ran when it started; one started now would open
+    // databases it is replacing.
+    if (agyMigrationRunning()) {
+      throw new ApiError(409, 'agy-migrating', 'Antigravity state found on the bucket is being moved to local disk. Try again in a moment.');
+    }
+    const h = prepareAgyHome();
+    if (h && !h.stateOk) {
+      throw new ApiError(409, 'agy-home', `Antigravity's local HOME is not set up (${[...h.errors, ...h.kept.filter((k) => k.includes('/.gemini/'))].join('; ') || h.home}), `
+        + 'so agy would keep its databases somewhere they are not saved. Not starting it.');
+    }
+  }
   // The login shell knows its own PTY-root pid before any `exec`. Adapters use
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the

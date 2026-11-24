@@ -100,9 +100,9 @@ elif [ "$MODE" = _part ] || [ "$MODE" = _adapter ]; then
   # Part of a parallel restore, started by the restore holding the lock.
   :
 elif [ "$MODE" = relink-antigravity ]; then
-  # Runs on the launch path, so it never waits behind a checkpoint. It needs no
-  # lock: every file it writes into the live tree is renamed into place, and a
-  # checkpoint reads the databases there through SQLite's backup.
+  # Never waits behind a checkpoint. It needs no lock: every file it writes into
+  # the live tree is renamed into place, and a checkpoint reads the databases
+  # there through SQLite's backup.
   :
 elif [ "$MODE" = prune ]; then
   # One prune at a time. It also takes the CHECKPOINT lock, a batch at a time
@@ -1365,46 +1365,41 @@ if [ "$MODE" = migrate-antigravity ]; then
   exit 0
 fi
 
-# ---------- relink-antigravity: ~/.gemini/{antigravity-cli,config} must be links ----------
-# The entrypoint links both into $ANTIGRAVITY_LIVE (local disk). On 2026-11-20
-# both were real directories on the bucket again, in a Space that had been up
-# since 11-16: agy then kept its SQLite databases on hf-mount, whose fsync is not
-# durable, the checkpoint never saw them, and four conversations came back
-# malformed. The server runs this at boot and before every agy launch when
-# either path is not the expected link (server/src/state-links.js):
+# ---------- relink-antigravity: a real ~/.gemini/{antigravity-cli,config} on the bucket ----------
+# AM's agy runs with HOME on local disk (server/src/agy-home.js), so it never
+# writes through ~/.gemini on the bucket. A real directory there was written by
+# an agy started some other way, or before that change: from 2026-11-20 both
+# were real directories on hf-mount (whose fsync is not durable) and four
+# conversations came back malformed. The server runs this once at start
+# (server/src/state-links.js), in the background:
 #
 #   - a link, wherever it points: left alone (the server reports a wrong one);
-#   - missing: the link is made. hf-mount has been seen to DROP a link made
-#     where a directory had just been moved away (the hand repair of 11-24
-#     lost ~/.gemini/config within minutes); agy then mkdirs a real one on
-#     the bucket at its next start. The server re-makes a missing link every
-#     30 s (AGENT_STATE_RELINK_MISSING_ONLY=1), besides before each launch;
+#   - missing: the link is made (ln -sT, which refuses to write INTO a
+#     directory that appeared meanwhile);
 #   - a real directory: its files are merged into the live tree, newer wins,
 #     the directory is moved aside to <path>.bucket-<UTC time> (never deleted),
 #     and the link is made. A database travels with its -wal (and -journal):
 #     the pair is copied together or not at all, the newer pair wins, and the
-#     live pair it replaces is kept under $AM_LOCAL/agent-state-replaced. -shm
-#     files are never copied; SQLite rebuilds them.
+#     live pair it replaces is kept under $AM_LOCAL/agent-state-replaced. A
+#     bucket pair that loses is logged; it stays in the moved-aside copy.
+#     -shm files are never copied; SQLite rebuilds them.
 #
-# Never while a process has the directory open or agy runs at all: moving files
-# under a running agy is how the 4th database was lost. Then nothing is touched
-# and it exits 3; the next launch tries again, and the server warns meanwhile.
+# Never while ANY agy process runs (AM's write into the live tree this merges
+# into) or any process has the directory open: then nothing is touched and it
+# exits 3; the next server start tries again, and the banner warns meanwhile.
 # Exit 0 when both are links afterwards, 1 when something could not be done.
 if [ "$MODE" = relink-antigravity ]; then
-  # Processes that have $1 open (fd or cwd), and every agy process of this HOME:
-  # those keep writing under ~/.gemini through whatever the path is then.
+  # Every agy process (whatever its HOME: AM's write into the live tree the
+  # merge writes into), and any process that has $1 open (fd or cwd).
+  # AGENT_STATE_AGY_EXE names the executable (tests use a unique one).
   agy_holders() {
     _real=$(realpath -e "$1" 2>/dev/null) || _real="$1"
     for _p in /proc/[0-9]*; do
       _pid=${_p#/proc/}
       [ "$_pid" = "$$" ] && continue
       _exe=$(readlink "$_p/exe" 2>/dev/null) || continue
-      case "${_exe##*/}" in
-        agy|agy\ *|antigravity|language_server*)
-          # One with another HOME writes elsewhere; an unreadable one counts.
-          _h=$(tr '\0' '\n' < "$_p/environ" 2>/dev/null | sed -n 's/^HOME=//p' | head -n 1)
-          if [ -z "$_h" ] || [ "$_h" = "$HOME" ]; then echo "pid $_pid: ${_exe##*/}"; continue; fi ;;
-      esac
+      _b="${_exe##*/}"; _b="${_b% (deleted)}"
+      if [ "$_b" = "${AGENT_STATE_AGY_EXE:-agy}" ]; then echo "pid $_pid: $_b"; continue; fi
       _hit=$(ls -l "$_p/cwd" "$_p/fd" 2>/dev/null | awk -v r="$_real" '/ -> / { t = $0; sub(/^.* -> /, "", t); if (t == r || index(t, r "/") == 1) { print t; exit } }')
       [ -n "$_hit" ] && echo "pid $_pid: $_hit"
     done | head -n 10
@@ -1417,7 +1412,7 @@ if [ "$MODE" = relink-antigravity ]; then
   merge_agy_dir() {
     _src="$1" _dst="$2"
     mkdir -p "$_dst" || return 1
-    rsync -a --update --exclude '*-wal' --exclude '*-shm' --exclude '*-journal' --exclude '*.db' \
+    rsync -a --update --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' --exclude '*.db-journal' \
       "$_src/" "$_dst/" || return 1
     _ok=0
     (cd "$_src" && find . \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-journal' \) -type f -print) \
@@ -1427,7 +1422,9 @@ if [ "$MODE" = relink-antigravity ]; then
       if [ ! -e "$_s" ]; then
         durable_log "relink: $_s has a WAL or journal but no database; left in the moved-aside copy"; continue
       fi
-      if [ -e "$_d" ] && [ "$(pair_mtime "$_d")" -ge "$(pair_mtime "$_s")" ]; then continue; fi
+      if [ -e "$_d" ] && [ "$(pair_mtime "$_d")" -ge "$(pair_mtime "$_s")" ]; then
+        durable_log "relink: kept the newer live $_d; the older bucket copy stays in the moved-aside folder"; continue
+      fi
       mkdir -p "$(dirname "$_d")" "$(dirname "$replaced/$_rel")" || { _ok=1; continue; }
       # Stage the new pair first, so a failed copy leaves the live pair as it was.
       rm -f "$_d.relink-tmp" "$_d.relink-tmp-wal" "$_d.relink-tmp-journal"
@@ -1454,15 +1451,12 @@ if [ "$MODE" = relink-antigravity ]; then
     link="$HOME/.gemini/$name" target="$ANTIGRAVITY_LIVE/$name"
     if [ -L "$link" ]; then continue; fi
     if [ ! -e "$link" ]; then
-      mkdir -p "$target" && ln -s "$target" "$link" && durable_log "relink: $link was missing; linked it to $target" || rc=1
+      mkdir -p "$target" && ln -sT "$target" "$link" && durable_log "relink: $link was missing; linked it to $target" || rc=1
       continue
     fi
     if [ ! -d "$link" ]; then
       durable_log "relink: $link is neither a link nor a directory; left alone"; rc=1; continue
     fi
-    # The watcher only puts back links the mount dropped; a directory waits
-    # for a launch (it may be deferred, and must not be logged every minute).
-    if [ -n "${AGENT_STATE_RELINK_MISSING_ONLY:-}" ]; then [ "$rc" = 0 ] && rc=3; continue; fi
     held=$(agy_holders "$link")
     if [ -n "$held" ]; then
       durable_log "relink: DEFERRED: $link is a real directory (Antigravity state on the bucket), but agy is running or has files in it: $(echo "$held" | paste -sd ';' -)"
@@ -1479,7 +1473,7 @@ if [ "$MODE" = relink-antigravity ]; then
       durable_log "relink: merged $link into $target but could not move it aside; it stays where it is"
       rc=1; continue
     fi
-    if ln -s "$target" "$link"; then
+    if ln -sT "$target" "$link"; then
       durable_log "relink: $link was a real directory (Antigravity state on the bucket); merged into $target, moved aside to $aside, linked again"
     else
       durable_log "relink: moved $link aside to $aside but could not link it to $target"; rc=1

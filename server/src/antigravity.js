@@ -42,7 +42,12 @@ export const STEP = { USER_INPUT: 14, PLANNER_RESPONSE: 15, ERROR_MESSAGE: 17, S
 const IN_FLIGHT = new Set([1, 2, 8, 11]);
 export const STATUS = { DONE: 3, ERROR: 7, WAITING: 9 };
 
+// On a Space agy runs with HOME=$AGY_HOME (agy-home.js), whose
+// .gemini/antigravity-cli is a local link to $ANTIGRAVITY_LIVE/antigravity-cli:
+// read that directly, never through the bucket HOME. Without it (a local run)
+// agy uses the real HOME.
 export function agyHome() {
+  if (process.env.ANTIGRAVITY_LIVE) return path.join(process.env.ANTIGRAVITY_LIVE, 'antigravity-cli');
   return path.join(process.env.HOME || '', '.gemini', 'antigravity-cli');
 }
 export function agyConversationsDir() { return path.join(agyHome(), 'conversations'); }

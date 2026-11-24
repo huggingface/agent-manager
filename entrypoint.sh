@@ -78,6 +78,11 @@ export FX_DURABLE="$DATA_DIR/state/fx"
 # Both are linked into one local tree that agent-state.sh checkpoints.
 export ANTIGRAVITY_LIVE="$AM_LOCAL/antigravity-home"
 export ANTIGRAVITY_DURABLE="$DATA_DIR/state/antigravity"
+# ...and agy itself runs with HOME here, on local disk (server/src/agy-home.js
+# lays it out: .gemini/{antigravity-cli,config} -> $ANTIGRAVITY_LIVE, every
+# other entry -> /data/home). The ~/.gemini links on the bucket below are kept
+# for anything else, but a link on hf-mount does not reliably stay a link.
+export AGY_HOME="$AM_LOCAL/agy-home"
 
 mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups" \
   "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE" "$GEMINI_LIVE" "$GEMINI_DURABLE" \

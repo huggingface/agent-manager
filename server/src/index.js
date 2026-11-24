@@ -56,7 +56,8 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import { checkpointHealth } from './checkpoint-health.js';
-import { ensureAntigravityLinks, stateLinkHealth, watchAntigravityLinks } from './state-links.js';
+import { migrateBucketAgyState, stateLinkHealth } from './state-links.js';
+import { prepareAgyHome } from './agy-home.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -1606,7 +1607,7 @@ const NON_SECRET = new Set([
   'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
   'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
   'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
-  'FX_LIVE', 'FX_DURABLE', 'ANTIGRAVITY_LIVE', 'ANTIGRAVITY_DURABLE',
+  'FX_LIVE', 'FX_DURABLE', 'ANTIGRAVITY_LIVE', 'ANTIGRAVITY_DURABLE', 'AGY_HOME',
   'AGENT_STATE_SCRIPT', 'AGENT_STATE_CHECKPOINT_SECONDS', 'DATA_DIR',
   'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
@@ -4246,12 +4247,18 @@ startStallProfiler();
 // happens here, synchronously; the decision itself waits for the trace digests
 // it judges "recent" with.
 runstate.init();
+// Antigravity runs with HOME on local disk (agy-home.js): lay it out now, then
+// move a real ~/.gemini/antigravity-cli or config left on the bucket by an agy
+// started some other way into the live tree — once, in the background, and
+// before any pane is revived (it is deferred while any agy runs).
+try { prepareAgyHome(); } catch (e) { console.error('[agy-home]', e && e.message); }
+const agyMigrated = migrateBucketAgyState({ reason: 'server start' }).catch(() => 'failed');
 setTimeout(() => {
   // A locked Space serves no terminals, so it starts nothing — but it still
   // records what's running, so the snapshot stays true for the next boot. The
   // decision waits for the first (bounded) privacy verdict rather than reading
   // the fail-closed `checking` state as a reason not to revive.
-  firstVerdict.then(() => {
+  Promise.all([firstVerdict, agyMigrated]).then(() => {
     const done = isLocked()
       ? Promise.resolve([])
       : runstate.reviveOnBoot({
@@ -4263,13 +4270,6 @@ setTimeout(() => {
     done.then(() => runstate.startRunstateWatch());
   });
 }, 8000);
-
-// Before any pane is revived: Antigravity's ~/.gemini links, which the
-// entrypoint makes at container boot, may have been replaced since (a server
-// restart inside a running container does not pass through it). The mount can
-// also drop a link on its own, so a missing one is put back every 30 s.
-try { ensureAntigravityLinks({ reason: 'server start' }); } catch (e) { console.error('[state-links]', e && e.message); }
-watchAntigravityLinks();
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`Agent Manager ${BIND_HOST}:${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);

@@ -244,41 +244,50 @@ Restarting first would repeat the loss mode this change is intended to fix.
 Rollback is configuration-only: point each harness back at its retained
 durable/legacy path. No migration step deletes the previous state.
 
-### When a state link breaks at runtime
+### Antigravity runs with HOME on local disk
 
-The entrypoint makes the HOME links (`~/.gemini/antigravity-cli`,
-`~/.gemini/config`, `~/.hermes`, `~/.fx`, `~/.local/share/opencode`) once, at
-container boot. From 2026-11-20 both Antigravity links were real directories on
-the bucket again, in a Space up since 11-16: agy kept its SQLite databases on
-hf-mount (whose fsync is not durable), the checkpoint and the conversation
-lookup never saw them, and four conversations came back malformed.
+The entrypoint links the HOME paths of CLIs with no config-dir override
+(`~/.gemini/antigravity-cli`, `~/.gemini/config`, `~/.hermes`, `~/.fx`,
+`~/.local/share/opencode`) to local disk, once, at container boot. From
+2026-11-20 both Antigravity links were real directories on the bucket again,
+in a Space up since 11-16: agy kept its SQLite on hf-mount (whose fsync is not
+durable), the checkpoint and the conversation lookup never saw it, and four
+conversations came back malformed.
 
-What replaces them: hf-mount itself can drop a link made where a directory
-was just moved away (reproduced in a workspace folder; the hand repair of
-11-24 lost `~/.gemini/config` minutes later), and agy's next start then
-`mkdir`s a real directory in its place. Not agy's self-update: the bucket
-directory starts at 11-20 14:22 (an `agy models` call), the 1.5.14 -> 1.5.16
-update ran on 11-22. agy 1.4.10 and 1.5.16, `agy install` and agy's update
-check, run against a linked temp HOME, all keep the links (and refuse to start
-on a dangling one rather than replace it).
+What replaced them: not agy's self-update (the bucket directory starts at
+11-20 14:22 with an `agy models` call; the 1.5.14 -> 1.5.16 update ran on
+11-22). agy 1.4.10 and 1.5.16, `agy install` and the update check keep a link
+in a temp HOME, and refuse to start on a dangling one. hf-mount does not
+reliably keep a link: the one restored by hand on 11-24 was gone again within
+minutes (reproduced once in four tries in a workspace folder), and agy
+`mkdir`s a missing one as a real directory on the bucket at its next start.
 
-- `server/src/state-links.js` lstat's every expected link. `/api/info.stateLinks`
-  is null while all are links to local disk, otherwise lists the broken ones;
-  the UI shows "Antigravity state is on the bucket (link replaced)" (or the
-  same for any other CLI) in the checkpoint banner's chunk.
-- Before every agy launch and at server start, `agent-state.sh
-  relink-antigravity` repairs Antigravity's: a missing link is made; a real
-  directory is merged into `$ANTIGRAVITY_LIVE` (newer wins; a database and its
-  `-wal`/`-journal` move as a pair or not at all, and the live pair it replaces
-  is kept under `$AM_LOCAL/agent-state-replaced`; `-shm` is never copied),
-  moved aside to `<path>.bucket-<UTC time>` (never deleted) and linked again.
-  Each repair is a line in `agent-state.log`.
-- Never while agy runs with this HOME or any process has the directory open:
-  then nothing moves, the log says DEFERRED, the banner says to stop the
-  Antigravity sessions, and the next launch tries again.
-- Every 30 s the server puts back a *missing* Antigravity link (safe while agy
-  runs: no data moves), so the window for agy to create a real directory is
-  short.
+So AM's agy no longer resolves its state through the bucket:
+
+- It runs with `HOME=$AGY_HOME` (`$AM_LOCAL/agy-home`, `server/src/agy-home.js`):
+  `.gemini/antigravity-cli` and `.gemini/config` there are links, on local
+  disk, to `$ANTIGRAVITY_LIVE`; every other entry of `/data/home` (and of
+  `/data/home/.gemini`) is linked in, so git, gh, the HF token, ssh, npm/pip,
+  skills and shell rc files work as in any pane. Laid out at server start and
+  before every agy launch (an entry added to `/data/home` later shows up); an
+  entry agy or a tool made in `$AGY_HOME` itself is never replaced. If the two
+  state links are not right, the launch is refused rather than let agy write
+  somewhere unsaved. The `agy models` probe and an `agy` typed in a pane
+  (`session.bashrc`) use the same HOME.
+- `server/src/antigravity.js` (conversation lookup, trace reading, share,
+  presence) reads `$ANTIGRAVITY_LIVE/antigravity-cli` directly. The checkpoint
+  and restore already worked on `$ANTIGRAVITY_LIVE`.
+- A real `/data/home/.gemini/antigravity-cli` or `config` (an agy started some
+  other way) is migrated once, at server start, in the background, before
+  panes are revived: `agent-state.sh relink-antigravity` merges it into
+  `$ANTIGRAVITY_LIVE` (newer wins; a `.db` and its `-wal`/`-journal` move as a
+  pair or not at all, the live pair it replaces is kept under
+  `$AM_LOCAL/agent-state-replaced`, a skipped bucket copy is logged, `-shm` is
+  never copied), moves it aside to `<path>.bucket-<UTC time>` (never deleted)
+  and links it again with `ln -sT`. Never while any agy runs: then it is
+  DEFERRED to the next start. Each step is a line in `agent-state.log`.
+- `/api/info.stateLinks` and the banner report any CLI state link that is not
+  the link to local disk, including agy's own two under `$AGY_HOME`.
 
 ## Guarantees and remaining work
 

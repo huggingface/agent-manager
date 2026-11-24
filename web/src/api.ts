@@ -130,7 +130,7 @@ export interface CheckpointHealth {
 }
 /** A CLI state link under HOME that is not the link to local disk (server/src/state-links.js). */
 export interface StateLinkHealth {
-  broken: { cli: string; link: string; target: string; kind: 'dir' | 'missing' | 'other-link' | 'file'; onBucket: boolean }[];
+  broken: { cli: string; link: string; target: string; kind: 'dir' | 'missing' | 'other-link' | 'file'; onBucket: boolean; local?: boolean }[];
   repair: { outcome: 'deferred' | 'failed'; at: number; reason: string; detail: string } | null;
   log: string;
 }

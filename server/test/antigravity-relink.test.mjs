@@ -1,7 +1,9 @@
-// Antigravity's ~/.gemini/{antigravity-cli,config} must be links to local disk
-// (state-links.js, agent-state.sh relink-antigravity). The incident: from
-// 2026-11-20 both were real directories on the bucket, agy kept its SQLite
-// there, and four conversations came back malformed.
+// The one-time migration of a real ~/.gemini/{antigravity-cli,config} on the
+// bucket into the live tree (state-links.js migrateBucketAgyState, agent-state.sh
+// relink-antigravity), and the link health behind /api/info.stateLinks. The
+// incident: from 2026-11-20 both were real directories on the bucket, agy kept
+// its SQLite there, and four conversations came back malformed. AM's agy now
+// runs with HOME on local disk (agy-home.test.mjs); this is the clean-up.
 //
 // Everything runs in temporary directories, with an allowlisted environment:
 // a shell inside a running Space exports the real live and durable paths.
@@ -17,7 +19,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.resolve(here, '../../scripts/agent-state.sh');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'am-agy-relink-'));
 process.env.DATA_DIR = path.join(base, 'server-data');
-const { ensureAntigravityLinks, readStateLinkHealth, expectedLinks, _reset } = await import('../src/state-links.js');
+const { prepareAgyHome } = await import('../src/agy-home.js');
+const { migrateBucketAgyState, agyMigrationRunning, readStateLinkHealth, expectedLinks, _reset } = await import('../src/state-links.js');
+// A name no real process has: the check counts every agy on the machine.
+const AGY_EXE = `agy-test-${process.pid}`;
 
 const children = [];
 after(() => { for (const c of children) try { c.kill('SIGKILL'); } catch {} });
@@ -36,6 +41,7 @@ function world() {
     ANTIGRAVITY_LIVE: path.join(local, 'antigravity-home'),
     ANTIGRAVITY_DURABLE: path.join(data, 'state/antigravity'),
     AGENT_STATE_LOG: path.join(data, 'state/agent-state.log'),
+    AGENT_STATE_AGY_EXE: AGY_EXE,
   };
   for (const d of [env.TMPDIR, path.join(env.HOME, '.gemini'), path.join(env.ANTIGRAVITY_LIVE, 'antigravity-cli'), path.join(env.ANTIGRAVITY_LIVE, 'config')]) {
     fs.mkdirSync(d, { recursive: true });
@@ -43,6 +49,8 @@ function world() {
   const link = path.join(env.HOME, '.gemini/antigravity-cli');
   const cfg = path.join(env.HOME, '.gemini/config');
   const live = path.join(env.ANTIGRAVITY_LIVE, 'antigravity-cli');
+  // agy's own HOME on local disk, as the server lays it out at start.
+  assert.equal(prepareAgyHome(env).stateOk, true);
   return { root, env, link, cfg, live, liveCfg: path.join(env.ANTIGRAVITY_LIVE, 'config') };
 }
 const linkOk = (w) => {
@@ -73,15 +81,16 @@ os._exit(0)  # no close: no checkpoint, the row stays in the WAL
 }
 const asides = (w, name) => fs.readdirSync(path.dirname(w.link)).filter((f) => f.startsWith(`${name}.bucket-`));
 
-test('links that are fine cost nothing and report nothing', () => {
+test('links that are fine cost nothing and report nothing', async () => {
   _reset();
   const w = world(); linkOk(w);
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'ok');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'ok');
   assert.equal(readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR }), null);
-  assert.deepEqual(expectedLinks(w.env).map((l) => l.link), [w.link, w.cfg]);
+  assert.deepEqual(expectedLinks(w.env).filter((l) => !l.local).map((l) => l.link), [w.link, w.cfg]);
+  assert.equal(expectedLinks(w.env).filter((l) => l.local).length, 2, "and agy's own two, on local disk");
 });
 
-test('a link replaced by a real directory is merged, moved aside and relinked before launch; the WAL comes along', () => {
+test('a link replaced by a real directory is merged, moved aside and relinked; the WAL comes along', async () => {
   _reset();
   const w = world();
   fs.symlinkSync(w.liveCfg, w.cfg);
@@ -105,7 +114,7 @@ test('a link replaced by a real directory is merged, moved aside and relinked be
   assert.deepEqual({ cli: before.broken[0].cli, kind: before.broken[0].kind, onBucket: before.broken[0].onBucket },
     { cli: 'antigravity', kind: 'dir', onBucket: true });
 
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'repaired');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
 
   assert.equal(fs.readlinkSync(w.link), w.live);
   assert.equal(readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR }), null);
@@ -130,7 +139,7 @@ test('a link replaced by a real directory is merged, moved aside and relinked be
     /relink-antigravity relink: .*antigravity-cli was a real directory \(Antigravity state on the bucket\); merged into .*, moved aside to .*\.bucket-/);
 });
 
-test('a newer bucket database replaces the live pair as a pair; the replaced one is kept', () => {
+test('a newer bucket database replaces the live pair as a pair; the replaced one is kept', async () => {
   _reset();
   const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
   const old = Math.floor(Date.now() / 1000) - 3600;
@@ -139,7 +148,7 @@ test('a newer bucket database replaces the live pair as a pair; the replaced one
   write(path.join(w.live, 'conversations/c.db-shm'), 'live-old-c-shm', old);
   fs.mkdirSync(w.link);
   write(path.join(w.link, 'conversations/c.db'), 'bucket-new-c');
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'repaired');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
   assert.equal(fs.readFileSync(path.join(w.live, 'conversations/c.db'), 'utf8'), 'bucket-new-c');
   // The old WAL must not be replayed onto the newer database.
   assert.equal(fs.existsSync(path.join(w.live, 'conversations/c.db-wal')), false);
@@ -149,12 +158,12 @@ test('a newer bucket database replaces the live pair as a pair; the replaced one
   assert.equal(fs.readFileSync(path.join(rep, dir, 'conversations/c.db-wal'), 'utf8'), 'live-old-c-wal');
 });
 
-test('the config link is repaired too, and a missing link is made', () => {
+test('the config link is repaired too, and a missing link is made', async () => {
   _reset();
   const w = world();
   fs.mkdirSync(w.cfg);
   write(path.join(w.cfg, 'mcp_config.json'), '{}');
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'repaired');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
   assert.equal(fs.readlinkSync(w.cfg), w.liveCfg);
   assert.equal(fs.readlinkSync(w.link), w.live);
   assert.equal(fs.readFileSync(path.join(w.liveCfg, 'mcp_config.json'), 'utf8'), '{}');
@@ -165,7 +174,7 @@ function startFakeAgy(w, cwd) {
   // A process whose executable is named agy, with this world's HOME.
   const bin = path.join(w.root, 'bin');
   fs.mkdirSync(bin, { recursive: true });
-  const agy = path.join(bin, 'agy');
+  const agy = path.join(bin, AGY_EXE);
   fs.copyFileSync(spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim(), agy);
   fs.chmodSync(agy, 0o755);
   const c = spawn(agy, ['60'], { env: { PATH: '/usr/bin:/bin', HOME: w.env.HOME }, cwd, stdio: 'ignore' });
@@ -174,7 +183,7 @@ function startFakeAgy(w, cwd) {
 }
 async function procUp(c) {
   for (let i = 0; i < 50; i++) {
-    try { if (fs.readlinkSync(`/proc/${c.pid}/exe`).endsWith('/agy')) return; } catch {}
+    try { if (fs.readlinkSync(`/proc/${c.pid}/exe`).endsWith(`/${AGY_EXE}`)) return; } catch {}
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error('fake agy did not start');
@@ -188,7 +197,7 @@ test('while agy runs nothing is moved, and the warning says why', async () => {
   const c = startFakeAgy(w, w.root);
   await procUp(c);
 
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'deferred');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'deferred');
   assert.ok(fs.lstatSync(w.link).isDirectory() && !fs.lstatSync(w.link).isSymbolicLink(), 'still the real directory');
   assert.ok(fs.existsSync(path.join(w.link, 'conversations/a.db-wal')));
   assert.equal(fs.existsSync(path.join(w.live, 'conversations/a.db')), false, 'nothing copied');
@@ -199,10 +208,10 @@ test('while agy runs nothing is moved, and the warning says why', async () => {
   assert.match(h.repair.detail, /agy is running/);
   assert.match(fs.readFileSync(w.env.AGENT_STATE_LOG, 'utf8'), /DEFERRED: .*antigravity-cli is a real directory/);
 
-  // Once it has exited, the next launch repairs it.
+  // Once it has exited, the next server start repairs it.
   c.kill('SIGKILL');
   await new Promise((r) => c.once('exit', r));
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'repaired');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
   assert.equal(readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR }), null);
   assert.equal(sqlite(path.join(w.live, 'conversations/a.db'), 'select x from t').stdout.trim(), 'only-in-wal');
 });
@@ -215,20 +224,54 @@ test('any process with a file or its cwd in the directory also defers it', async
   children.push(c);
   for (let i = 0; i < 50 && !fs.existsSync(`/proc/${c.pid}/cwd`); i++) await new Promise((r) => setTimeout(r, 20));
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'deferred');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'deferred');
   assert.equal(fs.lstatSync(w.link).isSymbolicLink(), false);
   c.kill('SIGKILL');
 });
 
-test('an agy with another HOME does not hold the repair back', async () => {
+test("an agy with any HOME holds the migration back: AM's agy writes into the same live tree", async () => {
   _reset();
   const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
   fs.mkdirSync(w.link);
   const other = world();
   const c = startFakeAgy(other, other.root);
   await procUp(c);
-  assert.equal(ensureAntigravityLinks({ env: w.env }), 'repaired');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'deferred');
+  assert.equal(fs.lstatSync(w.link).isSymbolicLink(), false);
   c.kill('SIGKILL');
+});
+
+test('a live copy that is newer is kept, and the skipped bucket copy is logged', async () => {
+  _reset();
+  const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
+  const old = Math.floor(Date.now() / 1000) - 3600;
+  fs.mkdirSync(w.link);
+  write(path.join(w.link, 'conversations/d.db'), 'bucket-old-d', old);
+  write(path.join(w.live, 'conversations/d.db'), 'live-new-d');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
+  assert.equal(fs.readFileSync(path.join(w.live, 'conversations/d.db'), 'utf8'), 'live-new-d');
+  assert.match(fs.readFileSync(w.env.AGENT_STATE_LOG, 'utf8'), /kept the newer live .*conversations\/d\.db; the older bucket copy stays in the moved-aside folder/);
+});
+
+test('only *.db WALs travel as pairs: another file ending in -wal is an ordinary file', async () => {
+  _reset();
+  const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
+  fs.mkdirSync(w.link);
+  write(path.join(w.link, 'notes-wal'), 'not sqlite');
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
+  assert.equal(fs.readFileSync(path.join(w.live, 'notes-wal'), 'utf8'), 'not sqlite');
+});
+
+test('a link is never written into a directory that appeared in its place', () => {
+  // What `ln -s` without -T did: with a real directory at the link's path it
+  // made <dir>/<name> -> live, a loop the next merge would copy. -T refuses.
+  const w = world();
+  fs.mkdirSync(w.cfg);
+  const r = spawnSync('ln', ['-sT', w.liveCfg, w.cfg], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.equal(fs.existsSync(path.join(w.cfg, 'config')), false);
+  assert.match(fs.readFileSync(script, 'utf8'), /ln -sT "\$target" "\$link"/);
+  assert.doesNotMatch(fs.readFileSync(script, 'utf8'), /ln -s "\$target"/);
 });
 
 test('the general check: any CLI whose state link became a real directory on the data dir', () => {
@@ -242,21 +285,24 @@ test('the general check: any CLI whose state link became a real directory on the
   assert.deepEqual(h.broken.map((b) => [b.cli, b.kind, b.onBucket]), [['hermes', 'dir', true]]);
 });
 
-test('the watcher puts back a link the mount dropped, even while agy runs, and leaves a directory to the launch', async () => {
+
+test("agy's own links on local disk are checked too, and a missing one counts", () => {
   _reset();
   const w = world(); linkOk(w);
-  const c = startFakeAgy(w, w.root);
-  await procUp(c);
-  fs.unlinkSync(w.cfg); // what hf-mount did to ~/.gemini/config on 11-24
-  assert.equal(ensureAntigravityLinks({ env: w.env, missingOnly: true }), 'repaired');
-  assert.equal(fs.readlinkSync(w.cfg), w.liveCfg);
-  assert.match(fs.readFileSync(w.env.AGENT_STATE_LOG, 'utf8'), /config was missing; linked it to/);
-  // A real directory: untouched, no log line, no failure recorded.
-  fs.unlinkSync(w.link); fs.mkdirSync(w.link);
-  const logged = fs.readFileSync(w.env.AGENT_STATE_LOG, 'utf8');
-  assert.equal(ensureAntigravityLinks({ env: w.env, missingOnly: true }), 'ok');
-  assert.equal(fs.lstatSync(w.link).isSymbolicLink(), false);
-  assert.equal(fs.readFileSync(w.env.AGENT_STATE_LOG, 'utf8'), logged);
-  assert.equal(readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR }).broken[0].kind, 'dir');
-  c.kill('SIGKILL');
+  const own = path.join(w.env.AM_LOCAL, 'agy-home/.gemini/config');
+  fs.unlinkSync(own);
+  const h = readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR });
+  assert.deepEqual(h.broken.map((b) => [b.link, b.kind, b.onBucket, b.local]), [[own, 'missing', false, true]]);
+});
+
+test('while the migration runs, agy launches are held (runner.js refuses with agy-migrating)', async () => {
+  _reset();
+  const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
+  fs.mkdirSync(w.link);
+  assert.equal(agyMigrationRunning(), false);
+  const p = migrateBucketAgyState({ env: w.env });
+  assert.equal(agyMigrationRunning(), true);
+  assert.equal(await p, 'repaired');
+  assert.equal(agyMigrationRunning(), false);
+  assert.match(fs.readFileSync(path.resolve(here, '../src/runner.js'), 'utf8'), /if \(agyMigrationRunning\(\)\) \{\n\s+throw new ApiError\(409, 'agy-migrating'/);
 });
