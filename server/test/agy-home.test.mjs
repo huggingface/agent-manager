@@ -234,7 +234,7 @@ test('when the bucket copy is the newer one it is kept, and the local copy is se
   assert.equal(fs.readFileSync(r.aside, 'utf8'), 'local old\n');
 });
 
-test('a linked directory replaced by a local one: newer files go back, then it is linked again', () => {
+test('a linked directory replaced by a local one: newer files go back in the background, then it is linked again', async () => {
   put(path.join(bucketHome, '.vim/a.vim'), 'old a\n');
   put(path.join(bucketHome, '.vim/b.vim'), 'bucket b\n');
   prepareAgyHome();
@@ -242,9 +242,85 @@ test('a linked directory replaced by a local one: newer files go back, then it i
   fs.unlinkSync(link);
   put(path.join(link, 'a.vim'), 'new a\n');
   put(path.join(link, 'c.vim'), 'new c\n');
-  layoutAgyHome({ reason: 'test' });
+  const h = layoutAgyHome({ reason: 'test' });
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), false, 'not on the launch path: done in the background');
+  assert.equal(h.pendingDirs.length, 1);
+  await h.reported;
   assert.ok(isLinkTo(link, path.join(bucketHome, '.vim')));
   assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/a.vim'), 'utf8'), 'new a\n');
   assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/b.vim'), 'utf8'), 'bucket b\n');
   assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/c.vim'), 'utf8'), 'new c\n');
+  // The bucket's a.vim it overwrote is kept, on local disk and on the bucket.
+  const rec = readStateLinkHealth().homeRestored.find((x) => x.path === link);
+  assert.equal(rec.bucketKept.length, 2);
+  for (const k of rec.bucketKept) assert.equal(fs.readFileSync(k, 'utf8'), 'old a\n');
+  assert.ok(rec.bucketKept.some((k) => k.startsWith(path.join(bucketHome, '.agy-home-replaced'))));
+});
+
+test('a bucket file with an older preserved mtime is overwritten only after a copy of it is kept, twice', async () => {
+  // A tool makes ~/.notes in the local HOME first; then ~/.notes appears on the
+  // bucket with an OLDER mtime (cp -p, rsync -a, tar, a restore).
+  const link = path.join(AGY_HOME, '.notes');
+  put(link, 'local notes\n');
+  prepareAgyHome();
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), false, 'no bucket counterpart yet: left alone');
+  put(path.join(bucketHome, '.notes'), 'restored bucket notes\n');
+  const past = Date.now() / 1000 - 86400;
+  fs.utimesSync(path.join(bucketHome, '.notes'), past, past);
+  const h = layoutAgyHome({ reason: 'test' });
+  const r = h.restored.find((x) => x.path === link);
+  assert.match(r.action, /copied back/);
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.notes'), 'utf8'), 'local notes\n');
+  assert.equal(r.bucketKept.length, 2, 'kept on local disk and on the bucket');
+  for (const k of r.bucketKept) assert.equal(fs.readFileSync(k, 'utf8'), 'restored bucket notes\n');
+  const durable = r.bucketKept.find((k) => k.startsWith(path.join(bucketHome, '.agy-home-replaced') + path.sep));
+  assert.ok(durable, 'one copy survives a restart (on the bucket)');
+  assert.equal(fs.readFileSync(r.aside, 'utf8'), 'local notes\n');
+  await h.reported;
+  const logged = fs.readFileSync(logFile, 'utf8');
+  assert.ok(logged.includes(durable) && logged.includes(r.aside), 'both paths in the log');
+  // The aside folder on the bucket is not itself linked into agy's HOME.
+  prepareAgyHome();
+  assert.equal(fs.existsSync(path.join(AGY_HOME, '.agy-home-replaced')), false);
+});
+
+test('identical content is just linked again: no copies, nothing overwritten', () => {
+  put(path.join(bucketHome, '.same'), 'same\n');
+  prepareAgyHome();
+  const link = path.join(AGY_HOME, '.same');
+  fs.unlinkSync(link); put(link, 'same\n');
+  const h = layoutAgyHome({ reason: 'test' });
+  const r = h.restored.find((x) => x.path === link);
+  assert.match(r.action, /identical/);
+  assert.deepEqual(r.bucketKept, []);
+  assert.ok(isLinkTo(link, path.join(bucketHome, '.same')));
+});
+
+// ---------- the wrapper: loops and an unset AGY_HOME ----------
+const wrapper = path.resolve(here, '../../scripts/agy-wrapper.sh');
+test('a real agy that became a link to the wrapper does not loop', () => {
+  const d = path.join(root, 'loop');
+  fs.mkdirSync(path.join(d, 'wrap'), { recursive: true }); fs.mkdirSync(path.join(d, 'bin'), { recursive: true });
+  fs.symlinkSync(wrapper, path.join(d, 'wrap/agy'));
+  fs.symlinkSync(path.join(d, 'wrap/agy'), path.join(d, 'bin/agy')); // the "real" one: the wrapper again
+  const env = { PATH: `${d}/wrap:${d}/bin:${d}/wrap:/usr/bin:/bin`, HOME: bucketHome, AGY_HOME };
+  const r = spawnSync('sh', ['-c', 'agy --version'], { env, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(r.error, undefined, 'finished, did not hang');
+  assert.equal(r.status, 127);
+  assert.match(r.stderr, /no Antigravity CLI on PATH besides the manager's wrapper/);
+});
+
+test('with AGY_HOME unset the wrapper uses $AM_LOCAL/agy-home, and never the bucket HOME silently', () => {
+  const PATHV = `${path.join(local, 'agy-wrap')}:${path.join(local, 'bin')}:/usr/bin:/bin`;
+  prepareAgyHome();
+  // AM_LOCAL known: its agy-home (the one the server laid out).
+  assert.match(execFileSync('sh', ['-c', 'agy x'], { env: { PATH: PATHV, HOME: bucketHome, AM_LOCAL: local }, encoding: 'utf8' }), new RegExp(`HOME=${local}/agy-home ARGS=x`));
+  // Neither, with HOME on the bucket: refused.
+  const r = spawnSync('sh', ['-c', 'agy x'], { env: { PATH: PATHV, HOME: bucketHome, DATA_DIR: data }, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /is on the bucket.*Not starting|Not starting/s);
+  // Neither, outside a Space (HOME not on the data dir): agy as installed.
+  const other = path.join(root, 'plain-home');
+  fs.mkdirSync(other, { recursive: true });
+  assert.match(execFileSync('sh', ['-c', 'agy x'], { env: { PATH: PATHV, HOME: other, DATA_DIR: data }, encoding: 'utf8' }), new RegExp(`HOME=${other} ARGS=x`));
 });

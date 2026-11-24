@@ -274,13 +274,19 @@ So AM's agy no longer resolves its state through the bucket:
   state links are not right, the launch is refused rather than let agy write
   somewhere unsaved. A linked entry that a save by rename (`sed -i`, an
   editor) turned into a local file is put back: the newer side goes to the
-  bucket, the local copy is kept under `$AM_LOCAL/agy-home-replaced/`, the
-  link is made again, and it is logged and shown in the banner.
+  bucket (identical content: nothing is copied), the local copy is kept under
+  `$AM_LOCAL/agy-home-replaced/<time>/local/`, a bucket version it overwrites
+  is kept under `.../bucket/` and durably under
+  `/data/home/.agy-home-replaced/<time>/`, the link is made again, and it is
+  logged and shown in the banner. A folder is put back in the background, not
+  on the launch path.
 - Every other `agy` uses the same HOME: `scripts/agy-wrapper.sh`, installed as
   `$AM_LOCAL/agy-wrap/agy`, is first on PATH (entrypoint.sh for everything
   the manager starts, `/etc/profile.d/agent-manager.sh` for login shells, which
-  reset PATH). It execs the next `agy` on PATH with `HOME=$AGY_HOME`, and
-  refuses if that HOME's state links are missing. Another agent's `bash -lc
+  reset PATH). It execs the next `agy` on PATH (compared as resolved files, so
+  a link back to the wrapper is skipped, not looped into) with
+  `HOME=$AGY_HOME` (default `$AM_LOCAL/agy-home`), and refuses if that HOME's
+  state links are missing, or if neither is set and HOME is on the bucket. Another agent's `bash -lc
   agy …` is what first wrote agy's state to the bucket on 11-20.
 - `server/src/antigravity.js` (conversation lookup, trace reading, share,
   presence) reads `$ANTIGRAVITY_LIVE/antigravity-cli` directly. The checkpoint

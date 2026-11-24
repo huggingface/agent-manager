@@ -127,14 +127,23 @@ function durableNote(env, text) {
  */
 export function layoutAgyHome({ env = process.env, reason = 'launch' } = {}) {
   const h = prepareAgyHome(env);
-  for (const r of h?.restored || []) {
-    const text = `agy-home: ${r.path} had become a local file (a save by rename); ${r.action}, local copy kept at ${r.aside}, linked to ${r.target} again`;
+  if (!h) return h;
+  const report = (r) => {
+    const text = r.error
+      ? `agy-home: ${r.path} had become a local ${r.kind} (a save by rename); ${r.action}`
+      : `agy-home: ${r.path} had become a local ${r.kind} (a save by rename); ${r.action}`
+        + `; local copy kept at ${r.aside}`
+        + (r.bucketKept?.length ? `; the bucket version(s) it replaced kept at ${r.bucketKept.join(', ')}` : '')
+        + `; linked to ${r.target} again`;
     console.warn(`[agy-home] ${reason}: ${text}`);
-    homeNotices.push({ at: Date.now(), path: r.path, target: r.target, action: r.action, aside: r.aside });
+    homeNotices.push({ at: Date.now(), path: r.path, target: r.target, action: r.action, aside: r.aside, bucketKept: r.bucketKept || [] });
     if (homeNotices.length > 20) homeNotices.shift();
-    durableNote(env, text);
-  }
-  if (h?.restored?.length) cache = { at: 0, value: null };
+    cache = { at: 0, value: null };
+    return durableNote(env, text);
+  };
+  const notes = h.restored.map(report);
+  // Folders are put back in the background (agy-home.js); reported when done.
+  h.reported = Promise.all([...notes, h.dirsDone.then((dirs) => Promise.all(dirs.map(report)))]);
   return h;
 }
 
