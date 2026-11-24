@@ -241,6 +241,14 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
 // Expanded by the launching shell, so it follows the key present at launch.
 const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemini"}'}`;
 export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
+// Interactive agy sessions approve their own tool calls. agy 1.5 starts in Auto
+// mode only where it has the OS terminal sandbox ("Auto mode is not available:
+// it needs the OS terminal sandbox"), which this container cannot provide (no
+// user namespaces), so it falls back to Default and asks before every command;
+// the old settings.json `toolPermission: "always-proceed"` no longer applies.
+// Sessions only: `agy models` and other subcommands take no such flag.
+const AGY_SKIP_PERMISSIONS = '--dangerously-skip-permissions';
+const agySession = (tail = '') => agyCommand(join(AGY_SKIP_PERMISSIONS, tail));
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 const GEMINI_DEPRECATED = 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI. '
@@ -322,10 +330,10 @@ export const CLIS = [
     // under it tells them apart: `? for shortcuts`, or `esc to cancel` while
     // it works (captured from agy 1.4.10).
     promptDetector: { idle: /^\? for shortcuts\b/ },
-    run: (f) => agyCommand(f),
-    cont: (f) => agyCommand(join(f, '-c')),
-    withPrompt: (q, _images, f) => agyCommand(join(f, `-i ${q}`)), // -i = interactive session seeded with the prompt
-    resume: (id, f) => agyCommand(join(f, `--conversation ${id}`)), // id: a uuid, checked by runner.js
+    run: (f) => agySession(f),
+    cont: (f) => agySession(join(f, '-c')),
+    withPrompt: (q, _images, f) => agySession(join(f, `-i ${q}`)), // -i = interactive session seeded with the prompt
+    resume: (id, f) => agySession(join(f, `--conversation ${id}`)), // id: a uuid, checked by runner.js
     launch: { model: true, efforts: AGY_EFFORTS,
       flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
     noUpdate: 'a prebuilt binary from Google, not an npm package. The image installs the newest release when it is built, so Update CLIs (a factory reboot) upgrades it',
