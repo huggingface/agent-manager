@@ -21,8 +21,8 @@ await build({
       import React from 'react';
       import { renderToStaticMarkup } from 'react-dom/server';
       import HealthBanners from './src/components/HealthBanners.tsx';
-      export const render = (checkpoint, backup = null) =>
-        renderToStaticMarkup(<HealthBanners checkpoint={checkpoint} backup={backup} onOpenSettings={() => {}} />);
+      export const render = (checkpoint, backup = null, disk = null) =>
+        renderToStaticMarkup(<HealthBanners checkpoint={checkpoint} backup={backup} disk={disk} onOpenSettings={() => {}} />);
     `,
   },
   bundle: true, format: 'esm', platform: 'node', outfile: out, jsx: 'automatic', logLevel: 'silent',
@@ -85,9 +85,32 @@ test('the bucket-backup banner still renders beside it', () => {
   assert.match(html, /Bucket backup is failing\./);
 });
 
+test('the local-disk headroom banner renders both low-disk and boot-headroom states', () => {
+  const GiB = 1024 ** 3;
+  const low = render(null, null, {
+    lowDisk: true, bootRisk: false,
+    freeBytes: 6.4 * GiB, totalBytes: 50 * GiB, warnFreeBytes: 10 * GiB, usedBytes: 43.6 * GiB,
+    stateBytes: 5 * GiB, bootPeakBytes: 8 * GiB, bootFreeBytes: 42 * GiB,
+    source: 'space-quota', checkedAt: 1794578400000,
+  });
+  assert.match(low, /class="bkfail ckfail diskfail"/);
+  assert.match(low, /<b>Local disk has 6\.4 GB left \(of 50 GB\)\.<\/b>/);
+  assert.match(low, /Below 10 GB, checkpoints can fail and this Space risks not being able to boot/);
+  assert.match(low, /\$AM_LOCAL/);
+
+  const bootOnly = render(null, null, {
+    lowDisk: false, bootRisk: true,
+    freeBytes: 18 * GiB, totalBytes: 50 * GiB, warnFreeBytes: 10 * GiB, usedBytes: 32 * GiB,
+    stateBytes: 26 * GiB, bootPeakBytes: 44 * GiB, bootFreeBytes: 6 * GiB,
+    source: 'space-quota', checkedAt: 1794578400000,
+  });
+  assert.match(bootOnly, /<b>Local disk may not have enough room to boot \(6\.0 GB startup headroom of 50 GB\)\.<\/b>/);
+  assert.match(bootOnly, /needs ~44 GB on local disk at startup/);
+});
+
 test('App loads the banners on demand, not in the entry', () => {
   const app = fs.readFileSync(path.join(WEB, 'src/App.tsx'), 'utf8');
   assert.match(app, /lazy\(\(\) => import\('\.\/components\/HealthBanners'\)/);
-  assert.doesNotMatch(app, /^import .*(BackupBanner|CheckpointBanner|HealthBanners)/m);
-  assert.match(app, /\(info\?\.backup \|\| info\?\.checkpoint\) && <Suspense>/);
+  assert.doesNotMatch(app, /^import .*(BackupBanner|CheckpointBanner|DiskBanner|HealthBanners)/m);
+  assert.match(app, /\(info\?\.backup \|\| info\?\.checkpoint \|\| info\?\.disk\) && <Suspense>/);
 });
