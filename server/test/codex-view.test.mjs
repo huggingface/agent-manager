@@ -107,3 +107,36 @@ test('coordination awaits native state, never uses cached idle or a missing term
  fail=true;assert.equal(await runtime.coordinationState(s),'unknown');
  assert.equal(await runtime.coordinationState({id:'shell',cli:'shell'}),null);
 });
+
+// A poll's status check is built from the roster's memory snapshot. Coordination
+// and the Reader decide on a status whose binding was read from the file, so they
+// must start their own check: never wait on the poll's, never ask with a snapshot.
+test('coordination and the Reader never join a pending display check, and never ask with a snapshot', async () => {
+  const asked = []; const snapshot = { forSession: () => ({}) };
+  const bindings = { forSession: () => ({}), snapshot: () => snapshot };
+  const runtime = new SessionRuntime({ bindings, codex: {
+    attach: async () => { throw Error('no connection'); },
+    status: async (_id, { display = null } = {}) => {
+      asked.push(display);
+      if (display) await new Promise((r) => setImmediate(r)); // the poll's check stays pending
+      return { status: display ? 'idle' : 'working' };
+    } } });
+  const s = { id: 's', cli: 'codex' };
+  runtime.presentation(s, snapshot); // a sidebar poll
+  assert.deepEqual(asked, [snapshot], 'the badge is asked with the roster snapshot');
+  assert.equal(await runtime.coordinationState(s), 'working', 'coordination got a status of its own, from the file');
+  assert.equal((await runtime.trace(s, { turns: [] })).activity, 'working', 'so did the Reader');
+  assert.equal((await runtime.trace({ ...s, archivedAt: 'now' }, { turns: [] })).activity, 'working', 'archived Reader too');
+  assert.deepEqual(asked, [snapshot, null, null, null], 'none of them asked with a display snapshot');
+  await new Promise((r) => setImmediate(r));
+});
+test('a row presented without a snapshot takes its own from memory; the store itself is never passed as display', async () => {
+  const asked = []; let fileReads = 0; const snapshot = { forSession: () => ({}) };
+  const bindings = { forSession: () => { fileReads++; return {}; }, snapshot: () => snapshot };
+  const runtime = new SessionRuntime({ bindings, codex: { status: async (_id, { display = null } = {}) => { asked.push(display); return { status: 'idle' }; } } });
+  runtime.presentation({ id: 'a', cli: 'codex' });
+  assert.equal(fileReads, 0, 'no file read for a row'); assert.deepEqual(asked, [snapshot]);
+  runtime.presentation({ id: 'b', cli: 'codex' }, bindings);
+  assert.deepEqual(asked, [snapshot, null], 'a caller that passes the store gets a file-backed status, not display');
+  await new Promise((r) => setImmediate(r));
+});

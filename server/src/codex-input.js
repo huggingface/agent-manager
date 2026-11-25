@@ -23,12 +23,19 @@ export class CodexInput {
     Object.assign(this, { getSession, listSessions, bindings, endpoint, connect, observe, receipts, enabled, assertWritable, owner });
     this.clients = new Map(); this.busy = new Set(); this.attaching = new Map(); this.reconnecting = new Set();
   }
-  context(id, { allowArchived = false } = {}) {
+  // `display`: the roster's memory snapshot (CodexBindings.snapshot()), passed
+  // by status() when a poll asks for the badge. The binding then comes from
+  // that snapshot and the workspace from the binding, so a poll never reads
+  // the bindings file or resolves a path on the bucket. Every decision - send,
+  // answer, interrupt, reconnect, attribution - calls this without it and
+  // reads the file, before and after its awaits.
+  context(id, { allowArchived = false, display = null } = {}) {
     if (!this.enabled()) throw fail('codex-pilot-disabled', 'Shared Reader input is disabled.');
-    const s = this.getSession(id), binding = this.bindings.forSession(id), endpoint = this.endpoint();
+    const bindings = display || this.bindings;
+    const s = this.getSession(id), binding = bindings.forSession(id), endpoint = this.endpoint();
     if (!s || !binding) throw fail('codex-unmapped', 'This session has no shared Codex binding. Resolve or import the exact existing thread before sending.');
     if (!allowArchived && s.archivedAt) throw fail('codex-target-archived', 'The receiving AM session is archived. Restore this same session from AM Archive before sending to it; its shared Codex binding and conversation are preserved.');
-    const context = contextForThread(binding.threadId, { sessions: this.listSessions(), bindings: this.bindings, endpoint });
+    const context = contextForThread(binding.threadId, { sessions: this.listSessions(), bindings, endpoint, display: !!display });
     if (context.amSessionId !== id) throw fail('codex-binding-stale', 'The shared binding changed.');
     return { ...context, endpoint, stamp: JSON.stringify([s.sessionUuid, binding.endpointId, binding.threadId, binding.revision, binding.cwd]) };
   }
@@ -38,7 +45,8 @@ export class CodexInput {
   async metadata(client, context) {
     if (client.endpoint.socket !== context.endpoint.socket || client.endpoint.home !== context.endpoint.home) throw fail('codex-endpoint-changed', 'The Codex server changed.');
     const { thread } = await client.call('thread/read', { threadId: context.threadId, includeTurns: false });
-    if (thread?.id !== context.threadId || thread.parentThreadId || fs.realpathSync(thread.cwd) !== context.workdir) throw fail('codex-thread-mismatch', 'The server returned a different conversation.');
+    // Resolved off the main thread: the thread's cwd is a workspace on the bucket.
+    if (thread?.id !== context.threadId || thread.parentThreadId || await fs.promises.realpath(thread.cwd) !== context.workdir) throw fail('codex-thread-mismatch', 'The server returned a different conversation.');
     return thread;
   }
   existing(id, context) {
@@ -46,8 +54,11 @@ export class CodexInput {
     if (entry && (entry.stamp !== context.stamp || entry.client.closed)) { entry.client.close(); this.clients.delete(id); return null; }
     return entry?.client;
   }
-  async status(id) {
-    const context = this.context(id, { allowArchived: true }); let client = this.existing(id, context), temporary = false;
+  // Read-only. With `display` (see context) the badge is built from the roster's
+  // snapshot and can describe a binding the file lost up to a few seconds ago;
+  // without it, coordination gets a status whose binding was read from the file.
+  async status(id, { display = null } = {}) {
+    const context = this.context(id, { allowArchived: true, display }); let client = this.existing(id, context), temporary = false;
     try {
       if (!client) { client = await this.observe(context.endpoint); temporary = true; }
       const thread = await this.metadata(client, context);
@@ -55,10 +66,10 @@ export class CodexInput {
       const activeTurnId = thread.status?.type === 'active' && latestTurn?.status === 'inProgress' ? latestTurn.id : null;
       let recoveryKey=null, recoveryError=null;
       if(thread.status?.type==='notLoaded' && !this.getSession(id).archivedAt) {
-        try { recoveryKey=(await this.recovery(id,context,thread,latestTurn)).key; }
+        try { recoveryKey=(await this.recovery(id,context,thread,latestTurn,display)).key; }
         catch { recoveryError='Saved settings require review in Codex Terminal or Remote before reopening this task.'; }
       }
-      this.check(id, context, { allowArchived: true });
+      this.check(id, context, { allowArchived: true, display });
       return { activeTurnId, recoveryKey, recoveryError, lastTurnStatus:latestTurn?.status || null, connected: !temporary, status: client.requests?.size ? 'needs-input' : taskStatus(thread.status), requests: temporary ? [] : client.requestView(),
         liveText: temporary ? '' : [...(client.items?.values() || [])].filter(i => i.type === 'agentMessage').slice(-1)[0]?.text || '',
         turnError: client.turnError || null };
@@ -75,8 +86,8 @@ export class CodexInput {
     });
     return page?.data?.[0] || null;
   }
-  async recovery(id,context,thread,latestTurn) {
-    const file=await sharedCodexRollout(this.getSession(id),{bindings:this.bindings,config:context.endpoint});
+  async recovery(id,context,thread,latestTurn,display=null) {
+    const file=await sharedCodexRollout(this.getSession(id),{bindings:display||this.bindings,config:context.endpoint,display:!!display});
     return recoveryPlan(file,context,thread,latestTurn);
   }
   async reconnect(id,{recoveryKey},{signal,verifyCaller=()=>{}}={}) {

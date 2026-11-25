@@ -67,3 +67,10 @@ test('rejects outside files, symlink escapes, unavailable daemon, invalid header
  g.deps.connect = async () => { const client = await connect(); fs.writeFileSync(g.bindings.file, '{"version":1,"bindings":[]}'); return client; };
  await assert.rejects(g.run()); assert.ok(g.closed());
 });
+
+test('a workspace that no longer resolves to the bound cwd is refused unless the caller asked for display', async () => {
+  const f = fixture(); fs.mkdirSync(path.join(cwd, 'elsewhere'), { recursive: true }); f.session.path = 'elsewhere';
+  await assert.rejects(f.run(), { code: 'codex-reader-unavailable' });
+  assert.equal(await sharedCodexRollout(f.session, { ...f.deps, bindings: f.bindings.snapshot(), display: true }), f.rollout,
+    'display: the binding from the snapshot, the workspace as recorded');
+});

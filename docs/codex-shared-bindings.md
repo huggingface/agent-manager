@@ -228,6 +228,21 @@ fails closed. Filesystems must support these durability operations. A leftover
 verify no AM writer is alive before an operator repairs it. No automatic lock
 removal is implemented.
 
+Every decision that acts on a binding — sending, approving, interrupting,
+attributing, binding, launching or stopping — reads the file at that moment,
+so an edit made by hand is honoured on the next request. The one reader that
+does not is the roster (`/api/tree`, `/api/meta`, `/api/sessions`), which
+consults the bindings on every poll of every tab, and on a bucket one
+synchronous open blocks the event loop for 40–115 ms (issue #235). The roster
+takes one in-memory snapshot per request, and the status badge of a bound row
+(idle, working, needs input) is built from that same snapshot, workspace
+included, so a poll never reads the file or resolves a path on the bucket.
+AM's own writes and reads refresh that copy as they happen; a file edited
+outside AM — an operator repairing or removing it, a bucket restore — is
+re-read off the main thread at most every 5 s while something polls, so a
+shared badge or its status can lag such an edit by that much and nothing else
+can.
+
 For bound sessions, standalone launch fallbacks and rollout-based repinning
 are bypassed. AM boot does not revive their terminal clients. Closing a browser
 view only detaches that view. Stopping AM closes its clients; the Codex server
