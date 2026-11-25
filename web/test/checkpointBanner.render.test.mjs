@@ -65,6 +65,8 @@ test('a few stuck files while the rest is saved reads as that', () => {
   }
   const one = render({ adapters: [adapter({ pending: 1, untested: 0 })], stalled: null, log });
   assert.match(one, /<b>Claude Code: 1 file is not being backed up\.<\/b>/);
+  const home = render({ adapters: [adapter({ adapter: 'home', pending: 1, untested: 0 })], stalled: null, log });
+  assert.match(home, /<b>Home: 1 file is not being backed up\.<\/b>/);
 });
 
 test('stuck files with others still waiting behind them is not "a few files"', () => {

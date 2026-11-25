@@ -21,13 +21,6 @@ if ! mkdir -p "$DATA_DIR/workspaces" 2>/dev/null; then
 fi
 export DATA_DIR
 
-# HOME remains the durable place for ordinary shell/user configuration. Agent
-# harness state is relocated to local disk below and checkpointed explicitly:
-# actively-mutated files and SQLite databases must not use the FUSE bucket as
-# their live filesystem.
-export HOME="$DATA_DIR/home"
-mkdir -p "$HOME"
-
 # NOTE: every var exported below must be listed in NON_SECRET (server/src/
 # index.js) — this script runs after the build-time env snapshot, so anything
 # exported here would otherwise show up as a detected "secret" in Settings.
@@ -35,13 +28,24 @@ mkdir -p "$HOME"
 # Fast, EPHEMERAL local area for tools / Python envs / package caches. Never the
 # /data bucket — object storage is slow for many-small-files and can't mmap or
 # lock well, so running libraries from it is painful. These reinstall on demand.
-export AM_LOCAL="/home/node/local"
+export AM_LOCAL="${AM_LOCAL:-/home/node/local}"
 if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then
   # Never fall back onto the bucket: agent state needs POSIX close/locking
   # semantics even when the preferred local prefix is unavailable.
   AM_LOCAL="/tmp/agent-manager-local"
   mkdir -p "$AM_LOCAL/bin"
 fi
+
+# Live HOME sits on local POSIX storage so harness symlinks (~/.gemini/*,
+# ~/.hermes, ~/.fx, ~/.local/share/opencode) and SQLite/lock files never touch
+# the hf-mount FUSE bucket, which can drop symlinks and lacks durable fsync.
+# Ordinary user dotfiles and skills in $HOME are restored from and checkpointed
+# back to AM_DURABLE_HOME ($DATA_DIR/home) by scripts/agent-state.sh.
+export AM_DURABLE_HOME="${AM_DURABLE_HOME:-$DATA_DIR/home}"
+export AM_LIVE_HOME="${AM_LIVE_HOME:-$AM_LOCAL/home}"
+export HOME="$AM_LIVE_HOME"
+mkdir -p "$AM_DURABLE_HOME" "$HOME"
+
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
 
 # One state model for every harness:
@@ -100,9 +104,10 @@ done
 # Preserve existing Gemini state while moving it out of durable HOME. The
 # legacy directory remains in place as a rollback copy.
 # Antigravity's two folders inside it are its own (linked below), not Gemini's.
-if [ -d "$HOME/.gemini" ] && [ ! -L "$HOME/.gemini" ]; then
+LEGACY_HOME="${AM_DURABLE_HOME:-$HOME}"
+if [ -d "$LEGACY_HOME/.gemini" ] && [ ! -L "$LEGACY_HOME/.gemini" ]; then
   if ! rsync -a --update --exclude '/antigravity-cli' --exclude '/config' \
-    "$HOME/.gemini/" "$GEMINI_DURABLE/"; then
+    "$LEGACY_HOME/.gemini/" "$GEMINI_DURABLE/"; then
     echo "ERROR: could not migrate Gemini state; refusing to start with an empty live home" >&2
     exit 1
   fi
@@ -110,21 +115,27 @@ fi
 
 # OpenClaw rejects a symlinked HOME/state path; migrate any state from the
 # earlier layouts into its durable checkpoint before restore.
+[ -L "$LEGACY_HOME/.openclaw" ] && rm "$LEGACY_HOME/.openclaw"
 [ -L "$HOME/.openclaw" ] && rm "$HOME/.openclaw"
-for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
+for legacy in "$LEGACY_HOME/.openclaw.pre-symlink" "$LEGACY_HOME/.openclaw" \
+  "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
   if [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
     if ! rsync -a --update "$legacy/" "$OPENCLAW_DURABLE/"; then
       echo "ERROR: could not migrate OpenClaw state from $legacy" >&2
       exit 1
     fi
   fi
+  [ "$LEGACY_HOME" = "$HOME" ] && [ "$legacy" = "$LEGACY_HOME/.openclaw" ] && break
 done
 
-# opencode, Hermes, fx and Antigravity expect their state at paths under HOME. The live
-# targets are local; legacy real directories are retained as rollback copies
-# instead of being deleted during migration. agy's databases are not raw-copied:
-# agent-state.sh moves them through SQLite's backup (rows still in a WAL come
-# along) and leaves its locks, logs and binaries behind.
+# opencode, Hermes, fx and Antigravity expect their state at paths under HOME.
+# Live HOME is local POSIX disk, while LEGACY_HOME ($AM_DURABLE_HOME when set)
+# may still hold real directories from earlier versions or after hf-mount
+# dropped a symlink. Real directories are migrated into *_DURABLE and retained
+# as .pre-agent-state rollback copies; agy's databases move through SQLite's
+# backup (rows still in a WAL come along) and leave locks, logs and binaries
+# behind. All five symlinks live inside local $HOME — zero symlinks are needed
+# or trusted on $DATA_DIR/home.
 AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
 export AGENT_STATE_SCRIPT
 OPENCODE_LINK="$HOME/.local/share/opencode"
@@ -134,30 +145,36 @@ AGY_LINK="$HOME/.gemini/antigravity-cli"
 AGY_CONFIG_LINK="$HOME/.gemini/config"
 migrate_tree() {
   case "$1" in
-    "$AGY_LINK"|"$AGY_CONFIG_LINK") sh "$AGENT_STATE_SCRIPT" migrate-antigravity "$1" ;;
+    */.gemini/antigravity-cli|*/.gemini/config) sh "$AGENT_STATE_SCRIPT" migrate-antigravity "$1" ;;
     *) rsync -a --update "$1/" "$2/" ;;
   esac
 }
-mkdir -p "$(dirname "$OPENCODE_LINK")" "$HOME/.gemini"
-for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE" \
-  "$FX_LINK|$FX_DURABLE" "$AGY_LINK|$ANTIGRAVITY_DURABLE/antigravity-cli" \
-  "$AGY_CONFIG_LINK|$ANTIGRAVITY_DURABLE/config"; do
-  lnk="${pair%%|*}"; dur="${pair##*|}"
-  if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
-    if ! migrate_tree "$lnk" "$dur"; then
-      echo "ERROR: could not migrate agent state from $lnk" >&2
-      exit 1
+for home_root in "$LEGACY_HOME" "$HOME"; do
+  for pair in ".local/share/opencode|$OPENCODE_DURABLE" ".hermes|$HERMES_DURABLE" \
+    ".fx|$FX_DURABLE" ".gemini/antigravity-cli|$ANTIGRAVITY_DURABLE/antigravity-cli" \
+    ".gemini/config|$ANTIGRAVITY_DURABLE/config"; do
+    rel="${pair%%|*}"; dur="${pair##*|}"
+    lnk="$home_root/$rel"
+    if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
+      if ! migrate_tree "$lnk" "$dur"; then
+        echo "ERROR: could not migrate agent state from $lnk" >&2
+        exit 1
+      fi
+      backup="$lnk.pre-agent-state"
+      if [ -e "$backup" ] || [ -L "$backup" ]; then
+        backup="$backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
+      fi
+      if ! mv "$lnk" "$backup"; then
+        echo "ERROR: could not retain rollback copy at $backup" >&2
+        exit 1
+      fi
+    elif [ "$home_root" != "$HOME" ] && [ -L "$lnk" ]; then
+      rm -f "$lnk" 2>/dev/null || true
     fi
-    backup="$lnk.pre-agent-state"
-    if [ -e "$backup" ] || [ -L "$backup" ]; then
-      backup="$backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
-    fi
-    if ! mv "$lnk" "$backup"; then
-      echo "ERROR: could not retain rollback copy at $backup" >&2
-      exit 1
-    fi
-  fi
+  done
+  [ "$LEGACY_HOME" = "$HOME" ] && break
 done
+mkdir -p "$(dirname "$OPENCODE_LINK")" "$HOME/.gemini"
 ln -sfn "$OPENCODE_LIVE" "$OPENCODE_LINK"
 ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
 ln -sfn "$FX_LIVE" "$FX_LINK"
@@ -175,6 +192,35 @@ if ! AGENT_STATE_FROM_ENTRYPOINT=1 sh "$AGENT_STATE_SCRIPT" restore; then
   exit 1
 fi
 boot "agent state restored in $(boot_elapsed "$PHASE_T0")"
+
+# Repoint managed-skills ownership records from legacy durable HOME to live
+# local HOME once restore_home has populated $HOME/.agents/skills.
+SKILLS_MANIFEST="$DATA_DIR/state/skills/skills-v1.json"
+if [ "$AM_DURABLE_HOME" != "$HOME" ] && [ -s "$SKILLS_MANIFEST" ] && command -v jq >/dev/null 2>&1; then
+  mkdir -p "$HOME/.agents/skills"
+  _old_skills="$(realpath -m "$AM_DURABLE_HOME/.agents/skills" 2>/dev/null || echo "$AM_DURABLE_HOME/.agents/skills")"
+  _new_skills="$(realpath -m "$HOME/.agents/skills" 2>/dev/null || echo "$HOME/.agents/skills")"
+  if [ "$_old_skills" != "$_new_skills" ] && grep -Fq "$_old_skills" "$SKILLS_MANIFEST" 2>/dev/null; then
+    if jq --arg old "$_old_skills" --arg new "$_new_skills" '
+      if (.skills | type) == "object" then
+        .skills |= with_entries(
+          .value as $r |
+          if ($r.targets | type) == "array" and ($r.id | type) == "string" then
+            .value.targets = (
+              $r.targets
+              | map(if .root == $old then .root = $new | .path = ($new + "/" + $r.id + "/SKILL.md") else . end)
+              | unique_by(.root)
+            )
+          else . end
+        )
+      else . end
+    ' "$SKILLS_MANIFEST" > "$SKILLS_MANIFEST.am-tmp.$$" 2>/dev/null && [ -s "$SKILLS_MANIFEST.am-tmp.$$" ]; then
+      mv -f "$SKILLS_MANIFEST.am-tmp.$$" "$SKILLS_MANIFEST"
+    else
+      rm -f "$SKILLS_MANIFEST.am-tmp.$$"
+    fi
+  fi
+fi
 
 # Junk an older version checkpointed (Codex tmp/plugin cache, old Claude config
 # backups) is excluded from every restore now, but still costs bucket space and

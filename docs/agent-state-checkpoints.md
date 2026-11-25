@@ -51,6 +51,12 @@ having all three files is not proof that the copy is a consistent database.
 | Hermes | `$AM_LOCAL/hermes` | `/data/state/hermes` | file tree plus online `state.db` backup |
 | fx | `$AM_LOCAL/fx-home` | `/data/state/fx` | file tree; locks and `index.pending` excluded |
 | Antigravity CLI | `$AM_LOCAL/antigravity-home` (`~/.gemini/antigravity-cli` and `~/.gemini/config` link here) | `/data/state/antigravity` | file tree plus an online backup of every changed `*.db`; WAL/SHM, locks, `bin/`, `log/`, `crashes/`, `updater/`, `presence/` excluded |
+| Home (`$HOME`) | `$AM_LOCAL/home` (`AM_LIVE_HOME`) | `/data/home` (`AM_DURABLE_HOME`) | ordinary user dotfiles and skills; managed harness paths, `*.pre-agent-state*`, `*.bucket-*`, caches (`~/.cache`, `~/.npm`, `~/.local/share/uv`), locks, WAL/SHM and symlinks excluded |
+
+Live `HOME` itself sits on `$AM_LOCAL/home` rather than `/data/home`, so the
+five harness symlinks (`~/.local/share/opencode`, `~/.hermes`, `~/.fx`,
+`~/.gemini/antigravity-cli`, `~/.gemini/config`) live on ordinary POSIX storage
+where `hf-mount` can never drop them.
 
 Remote agents already use a good object-store pattern: one closed, immutable
 Markdown file per message. Shell sessions have no model transcript; workspace

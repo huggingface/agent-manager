@@ -58,6 +58,16 @@ FX_DURABLE="${FX_DURABLE:-$DATA_DIR/state/fx}"
 # the encoder binary it unpacks into bin/ are regenerated and stay local.
 ANTIGRAVITY_LIVE="${ANTIGRAVITY_LIVE:-$AM_LOCAL/antigravity-home}"
 ANTIGRAVITY_DURABLE="${ANTIGRAVITY_DURABLE:-$DATA_DIR/state/antigravity}"
+# Ordinary user dotfiles and skills in live $HOME ($AM_LOCAL/home) restore from
+# and checkpoint to $AM_DURABLE_HOME ($DATA_DIR/home) when AM_DURABLE_HOME is
+# set and distinct from HOME. Leaving AM_DURABLE_HOME unset keeps the adapter
+# inactive so isolated harness tests never touch the caller's HOME.
+HOME_LIVE="${AM_LIVE_HOME:-${HOME:-}}"
+HOME_DURABLE="${AM_DURABLE_HOME:-}"
+HOME_ENABLED=0
+if [ -n "$HOME_DURABLE" ] && [ -n "$HOME_LIVE" ] && [ "$HOME_DURABLE" != "$HOME_LIVE" ]; then
+  HOME_ENABLED=1
+fi
 
 # rsyncs one big tree may run at once when it is copied from the local API
 # mirror. Claude and Codex each get a pool, the five small adapters one rsync
@@ -379,6 +389,24 @@ rsync_adapter() {
         --exclude '/antigravity-cli/bin/***' --exclude '/antigravity-cli/log/***' \
         --exclude '/antigravity-cli/crashes/***' --exclude '/antigravity-cli/updater/***' \
         --exclude '/antigravity-cli/presence/***' "$@" ;;
+    home)
+      # User dotfiles and skills only. Managed harnesses use their own adapters
+      # and local symlinks; rollback/bucket-relink dirs, ephemeral caches,
+      # locks, SQLite sidecars, and symlinks (--no-links after $@'s -a) never
+      # cross between live $HOME and $AM_DURABLE_HOME.
+      rsync_tree \
+        --exclude '/.gemini/***' \
+        --exclude '/.openclaw/***' --exclude '/.openclaw.pre-symlink/***' \
+        --exclude '/.local/share/opencode/***' \
+        --exclude '/.hermes/***' \
+        --exclude '/.fx/***' \
+        --exclude '/*.pre-agent-state*' --exclude '/*.pre-agent-state*/***' \
+        --exclude '**/*.pre-agent-state*' --exclude '**/*.pre-agent-state*/***' \
+        --exclude '/*.bucket-*' --exclude '/*.bucket-*/***' \
+        --exclude '**/*.bucket-*' --exclude '**/*.bucket-*/***' \
+        --exclude '/.cache/***' --exclude '/.npm/***' --exclude '/.local/share/uv/***' \
+        --exclude '*-wal' --exclude '*-shm' --exclude '*.lock' \
+        "$@" --no-links ;;
     *-files)
       rsync_tree --exclude 'checkpoints' --exclude '*.db' --exclude '*.db-*' \
         --exclude '*.sqlite*' --exclude '*-wal' --exclude '*-shm' "$@" ;;
@@ -538,6 +566,19 @@ batches0() {
 # them at its end (--delay-updates), so no partial file is ever visible; and
 # `next` is still taken before the tree is listed, so a file changed during
 # the copy is listed again by the next pass.
+find_changed_files() {
+  case "$1" in
+    home)
+      (cd "$2" && find . \( -path ./.gemini -o -path ./.openclaw -o -path ./.openclaw.pre-symlink \
+          -o -path ./.local/share/opencode -o -path ./.hermes -o -path ./.fx \
+          -o -path ./.cache -o -path ./.npm -o -path ./.local/share/uv \
+          -o -name '*.pre-agent-state*' -o -name '*.bucket-*' \) -prune \
+        -o -type f ! -name '*-wal' ! -name '*-shm' ! -name '*.lock' -newer "$3" -print0) ;;
+    *)
+      (cd "$2" && find . -type f -newer "$3" -print0) ;;
+  esac
+}
+
 checkpoint_tree() {
   key="$1" live="$2" durable="$3"
   [ -d "$live" ] || return 0
@@ -563,7 +604,7 @@ checkpoint_tree() {
   [ -s "$retry" ] && (cd "$live" && existing0) < "$retry" > "$ct_work/old"
   LC_ALL=C sort -zu "$ct_work/old" > "$ct_work/old.sorted"
   {
-    (cd "$live" && find . -type f -newer "$stamp" -print0)
+    find_changed_files "$key" "$live" "$stamp"
     [ -s "$untested" ] && (cd "$live" && existing0) < "$untested"
   } | LC_ALL=C sort -zu > "$ct_work/found"
   LC_ALL=C comm -z -23 "$ct_work/found" "$ct_work/old.sorted" > "$ct_work/new"
@@ -1069,6 +1110,13 @@ mirror_filters() {
     antigravity)
       printf '%s\n' '- *-wal' '- *-shm' '- *.lock' '- antigravity-cli/bin/*' '- antigravity-cli/log/*' \
         '- antigravity-cli/crashes/*' '- antigravity-cli/updater/*' '- antigravity-cli/presence/*' ;;
+    home)
+      printf '%s\n' '- .gemini/*' '- .openclaw/*' '- .openclaw.pre-symlink/*' \
+        '- .local/share/opencode/*' '- .hermes/*' '- .fx/*' \
+        '- *.pre-agent-state*' '- *.pre-agent-state*/*' '- */*.pre-agent-state*' '- */*.pre-agent-state*/*' \
+        '- *.bucket-*' '- *.bucket-*/*' '- */*.bucket-*' '- */*.bucket-*/*' \
+        '- .cache/*' '- .npm/*' '- .local/share/uv/*' \
+        '- *-wal' '- *-shm' '- *.lock' ;;
     claude)
       # Only the newest few config backups are restored (restore_claude_backups);
       # fetch just those rather than all ~2,400 — which needs a listing we can
@@ -1196,19 +1244,53 @@ restore_opencode() { restore_sqlite_tree "$1" "$OPENCODE_LIVE" opencode.db openc
 restore_hermes() { restore_sqlite_tree "$1" "$HERMES_LIVE" state.db state.db; }
 restore_fx() { restore_tree fx "$1" "$FX_LIVE"; }
 
+# Re-assert the five local harness symlinks inside $HOME_LIVE after restoring
+# ordinary dotfiles so nothing from $HOME_DURABLE can ever shadow or replace a
+# local harness link.
+ensure_home_links() {
+  [ -n "$HOME_LIVE" ] || return 0
+  mkdir -p "$HOME_LIVE/.local/share" "$HOME_LIVE/.gemini" \
+    "$OPENCODE_LIVE" "$HERMES_LIVE" "$FX_LIVE" \
+    "$ANTIGRAVITY_LIVE/antigravity-cli" "$ANTIGRAVITY_LIVE/config"
+  for _pair in \
+    "$HOME_LIVE/.local/share/opencode|$OPENCODE_LIVE" \
+    "$HOME_LIVE/.hermes|$HERMES_LIVE" \
+    "$HOME_LIVE/.fx|$FX_LIVE" \
+    "$HOME_LIVE/.gemini/antigravity-cli|$ANTIGRAVITY_LIVE/antigravity-cli" \
+    "$HOME_LIVE/.gemini/config|$ANTIGRAVITY_LIVE/config"; do
+    _lnk="${_pair%%|*}"; _tgt="${_pair##*|}"
+    if [ -e "$_lnk" ] && [ ! -L "$_lnk" ]; then
+      _aside="$_lnk.pre-home-link.$(date -u +%Y%m%dT%H%M%SZ).$$"
+      mv "$_lnk" "$_aside" || return 1
+    fi
+    ln -sfn "$_tgt" "$_lnk" || return 1
+  done
+}
+
+restore_home() {
+  [ "$HOME_ENABLED" = 1 ] || return 0
+  restore_tree home "$1" "$HOME_LIVE" || return 1
+  [ -n "$DRY_RUN" ] || ensure_home_links
+}
+checkpoint_home() {
+  [ "$HOME_ENABLED" = 1 ] || return 0
+  checkpoint_tree home "$1" "$2"
+}
+
 ADAPTERS="codex claude gemini openclaw opencode hermes fx antigravity"
+[ "$HOME_ENABLED" = 1 ] && ADAPTERS="$ADAPTERS home"
 live_of() {
   case "$1" in
     codex) echo "$CODEX_HOME" ;; claude) echo "$CLAUDE_CONFIG_DIR" ;; gemini) echo "$GEMINI_LIVE" ;;
     openclaw) echo "$OPENCLAW_STATE_DIR" ;; opencode) echo "$OPENCODE_LIVE" ;; hermes) echo "$HERMES_LIVE" ;;
-    fx) echo "$FX_LIVE" ;; antigravity) echo "$ANTIGRAVITY_LIVE" ;;
+    fx) echo "$FX_LIVE" ;; antigravity) echo "$ANTIGRAVITY_LIVE" ;; home) echo "$HOME_LIVE" ;;
   esac
 }
 durable_of() {
   case "$1" in
     codex) echo "$CODEX_DURABLE" ;; claude) echo "$CLAUDE_DURABLE" ;; gemini) echo "$GEMINI_DURABLE" ;;
     openclaw) echo "$OPENCLAW_DURABLE" ;; opencode) echo "$OPENCODE_DURABLE" ;; hermes) echo "$HERMES_DURABLE" ;;
-    fx) echo "$FX_DURABLE" ;; antigravity) echo "$ANTIGRAVITY_DURABLE" ;;
+    fx) echo "$FX_DURABLE" ;; antigravity) echo "$ANTIGRAVITY_DURABLE" ;; home) echo "$HOME_DURABLE" ;;
   esac
 }
 
@@ -1601,6 +1683,9 @@ else
   run_checkpoint hermes checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db
   run_checkpoint fx checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE"
   run_checkpoint antigravity checkpoint_antigravity "$ANTIGRAVITY_LIVE" "$ANTIGRAVITY_DURABLE"
+  if [ "$HOME_ENABLED" = 1 ]; then
+    run_checkpoint home checkpoint_home "$HOME_LIVE" "$HOME_DURABLE"
+  fi
   pass_done "$failures"
   publish_log
 fi
