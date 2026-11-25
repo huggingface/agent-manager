@@ -102,6 +102,7 @@ export interface Group {
   name: string;
   sessionIds: string[];
   layout?: GridSpec | null;
+  path?: string;
   createdAt?: string;
   // Pinned as a whole: holds the group's place above the rule and exempts
   // every member from the idle window. See Session.pinnedAt.

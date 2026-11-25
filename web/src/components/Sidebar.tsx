@@ -982,20 +982,27 @@ export default function Sidebar({
       )}
 
       {/* contextual creation into a specific group (a group row's + button) */}
-      {panel === 'create' && (
-        <div className="controls">
-          {createTarget && groupById[createTarget] && (
-            <div className="create-hint mono">into {groupById[createTarget].name}</div>
-          )}
-          <NewSession
-            clis={clis}
-            sessions={tree.sessions}
-            defaultPath={defaultPath}
-            onCreate={(n, c, p, l) => { onNewSession(n, c, p, createTarget ?? undefined, l); closePanel(); }}
-            onCancel={closePanel}
-          />
-        </div>
-      )}
+      {panel === 'create' && (() => {
+        const tg = createTarget ? groupById[createTarget] : undefined;
+        const targetPath = tg
+          ? (tg.path !== undefined
+            ? (tg.path || '.')
+            : (tg.sessionIds.map((id) => sessById[id]).find((s) => s && !isPassive(s.cli) && s.path)?.path || defaultPath))
+          : defaultPath;
+        return (
+          <div className="controls">
+            {tg && <div className="create-hint mono">into {tg.name}</div>}
+            <NewSession
+              key={createTarget || 'loose'}
+              clis={clis}
+              sessions={tree.sessions}
+              defaultPath={targetPath}
+              onCreate={(n, c, p, l) => { onNewSession(n, c, p, createTarget ?? undefined, l); closePanel(); }}
+              onCancel={closePanel}
+            />
+          </div>
+        );
+      })()}
 
       {/* Overview: pinned above the tree with the row anatomy (tile · name) so
           it reads as clickable. It used to carry an "N waiting" count in a

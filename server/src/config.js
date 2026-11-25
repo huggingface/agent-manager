@@ -514,3 +514,31 @@ export function slugify(s) {
 export function workspacePath(folder) {
   return path.join(WORKSPACES_DIR, folder);
 }
+
+// Sanitize a client-supplied workspace path: no '..', no absolute paths
+// outside WORKSPACES_DIR (an absolute path inside WORKSPACES_DIR has its
+// prefix stripped so it never doubles into WORKSPACES_DIR/data/workspaces/…).
+// Returns the normalized workspace-relative path ('' = root), or null.
+export function cleanRelPath(raw, workspacesDir = WORKSPACES_DIR) {
+  if (typeof raw !== 'string' || raw.includes('\0') || raw.includes('\\')) return null;
+  const root = path.resolve(workspacesDir);
+  const trimmed = raw.trim();
+  const rawSegs = trimmed.split('/').map((s) => s.trim());
+  if (rawSegs.some((s) => s === '..')) return null;
+  if (path.isAbsolute(trimmed)) {
+    const normAbs = path.resolve('/' + rawSegs.filter((s) => s && s !== '.').join('/'));
+    if (normAbs === root) return '';
+    const relFromRoot = path.relative(root, normAbs);
+    if (!relFromRoot || relFromRoot === '..' || relFromRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relFromRoot)) return null;
+    return relFromRoot.split(path.sep).join('/');
+  }
+  let rel = rawSegs.filter((s) => s && s !== '.').join('/');
+  const rootRel = root.replace(/^\/+/, '').split(path.sep).join('/');
+  if (rootRel.includes('/')) {
+    if (rel === rootRel) rel = '';
+    else if (rel.startsWith(`${rootRel}/`)) rel = rel.slice(rootRel.length + 1);
+  }
+  const abs = path.resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  return rel;
+}
