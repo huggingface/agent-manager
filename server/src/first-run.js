@@ -1,4 +1,5 @@
-// Pre-answering the dialogs a new agent session would otherwise stop at.
+// Pre-answering the dialogs a new agent session would otherwise stop at, and
+// keeping Claude Code from aging out restored transcripts.
 //
 // Everything here is measured against the installed CLIs rather than read off
 // their docs; docs/first-run-dialogs.md records the runs. Three facts shape the
@@ -92,11 +93,23 @@ export function trustWorkspacesRoot(dir = WORKSPACES_DIR) {
   }
 }
 
+// Claude Code's built-in default `cleanupPeriodDays` is 30: at startup it
+// unlinks every transcript under `$CLAUDE_CONFIG_DIR/projects` whose mtime is
+// older than 30 days. `agent-state.sh restore` preserves original bucket mtimes
+// (`SET_MTIMES`), so every cold boot + Claude launch silently deletes every
+// conversation older than 30 days from local disk — and resuming that session
+// then starts a fresh `--session-id <uuid>` file that overwrites the durable
+// bucket copy on the next checkpoint. Keep transcripts unless the operator has
+// explicitly configured `cleanupPeriodDays` in settings.json.
+export const CLAUDE_CLEANUP_PERIOD_DAYS = 99999;
+
 /**
  * The bypass-permissions warning, whose default button is "No, exit" — a blind
- * Enter on it quits the session, so it can never be answered by typing. This
- * lives in settings.json, which the app already writes (the hooks installer),
- * so it is not CLI-owned state.
+ * Enter on it quits the session, so it can never be answered by typing — plus
+ * `cleanupPeriodDays` so Claude Code does not delete conversations older than
+ * 30 days after `agent-state.sh` restores their original mtimes. Both live in
+ * settings.json, which the app already writes (the hooks installer), so it is
+ * not CLI-owned state.
  */
 export function ensureClaudeDialogDefaults() {
   const dir = process.env.CLAUDE_CONFIG_DIR;
@@ -105,8 +118,11 @@ export function ensureClaudeDialogDefaults() {
   try {
     const cfg = readObject(file);
     if (cfg === null) { console.warn(`[first-run] ${file} is not an object; leaving it alone`); return false; }
-    if (cfg.skipDangerousModePermissionPrompt === true) return false;
-    cfg.skipDangerousModePermissionPrompt = true;
+    const needSkip = cfg.skipDangerousModePermissionPrompt !== true;
+    const needRetention = cfg.cleanupPeriodDays === undefined;
+    if (!needSkip && !needRetention) return false;
+    if (needSkip) cfg.skipDangerousModePermissionPrompt = true;
+    if (needRetention) cfg.cleanupPeriodDays = CLAUDE_CLEANUP_PERIOD_DAYS;
     writeAtomic(file, `${JSON.stringify(cfg, null, 2)}\n`);
     return true;
   } catch (e) {
