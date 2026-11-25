@@ -82,26 +82,46 @@ export function kindOfName(name) {
 }
 
 // One folder's rows, as both the Files pane and folder file links show them.
-// One stat per entry (folders included) — the pane shows a Modified column.
 // `kind` comes from the NAME only: it just picks the row glyph, and sniffing
 // every extensionless file here would mean an extra open per row on a bucket.
 // The preview routes do the real detection for the one file being opened.
-export function listDirectory(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
-    const full = path.join(dir, e.name);
-    const isDir = e.isDirectory();
-    let size = 0, mtime = 0;
-    try {
-      const st = fs.statSync(full);
-      mtime = st.mtimeMs;
-      if (!isDir) size = st.size;
-    } catch {}
-    return isDir
-      ? { name: e.name, dir: true, size: 0, mtime }
-      : { name: e.name, dir: false, size, mtime, kind: kindOfName(e.name) ?? undefined };
-  });
-  entries.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name)));
-  return entries;
+//
+// At most `max` rows, folders first then by name, as before. The order is
+// decided from the names alone, so only the rows that are kept cost a stat —
+// one round trip each on a bucket. `truncated` counts the rest.
+//
+// `confine` (a real path) is for file links, which promise not to reach past
+// their root: a symlink is followed only if its real path stays under it.
+// One that leads out is listed by name as a symlink, with none of its target's
+// size, date or type.
+export const LIST_MAX = 2000;
+export function listDirectory(dir, { max = LIST_MAX, confine } = {}) {
+  const all = fs.readdirSync(dir, { withFileTypes: true });
+  all.sort((a, b) => (a.isDirectory() !== b.isDirectory() ? (a.isDirectory() ? -1 : 1) : a.name.localeCompare(b.name)));
+  const kept = all.length > max ? all.slice(0, max) : all;
+  return { entries: kept.map((e) => entryOf(dir, e, confine)), truncated: all.length - kept.length };
+}
+
+function entryOf(dir, e, confine) {
+  const full = path.join(dir, e.name);
+  let isDir = e.isDirectory();
+  if (confine && e.isSymbolicLink()) {
+    let real = null;
+    try { real = fs.realpathSync(full); } catch {}   // dangling: nothing to follow
+    if (!real || (real !== confine && !real.startsWith(confine + path.sep))) {
+      return { name: e.name, dir: false, size: 0, mtime: 0, symlink: true };
+    }
+    try { isDir = fs.statSync(real).isDirectory(); } catch {}
+  }
+  let size = 0, mtime = 0;
+  try {
+    const st = fs.statSync(full);
+    mtime = st.mtimeMs;
+    if (!isDir) size = st.size;
+  } catch {}
+  return isDir
+    ? { name: e.name, dir: true, size: 0, mtime }
+    : { name: e.name, dir: false, size, mtime, kind: kindOfName(e.name) ?? undefined };
 }
 
 // A NUL byte in the head is the classic "this is not text" tell — same heuristic

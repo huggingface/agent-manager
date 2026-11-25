@@ -59,7 +59,8 @@ example (an embedded preview does not change the app's URL):
 “Copy link” copies this URL. It identifies a named file location, independent of
 the originating session. Session rename or deletion does not invalidate it, but
 moving/deleting the file does. It opens the current file contents, not a snapshot.
-The link uses the same private Agent Manager access as the rest of the app.
+The link uses the same private Agent Manager access as the rest of the app (see
+below: it is not a permission boundary).
 
 ## Additional file locations
 
@@ -79,13 +80,24 @@ configuration fails at startup. This does not add editing access to those roots.
 
 The server checks both the lexical and real path on every resolution, listing,
 preview, raw and download request. Symlinks cannot leave their selected root: a
-folder that is (or sits behind) a symlink out of the root is refused, and while a
-listing names a symlink inside the folder the way the Files pane does, opening it
-is checked again and refused if it leads out. A folder lists in full, exactly as
-the Files pane lists it; bytes are only served for files (`is-directory` for a
-folder), listings only for folders. Previews
-cap text reads at 512 KiB and disclose truncation. HTML retains the existing
-opaque-origin sandbox and starts with scripts disabled. Missing files, unknown locations and unavailable remote files have explicit error states.
+folder that is (or sits behind) a symlink out of the root is refused. A folder
+listing follows a symlink only when its real path stays inside the root; one that
+leads out (or nowhere) is listed by name as a link, with none of its target's
+size, date or type, and opening it is refused. Bytes are only served for files
+(`is-directory` for a folder), listings only for folders.
+
+Large folders list their first 2,000 entries (folders first, then by name; the
+Files pane uses the same listing and the same cap). The response says how many
+more there are (`truncated`), and the view shows “N more not shown”.
+
+A file link is a convenience for reading files, not a permission boundary. Anyone
+who can open the link can already use the rest of the app, including the Files
+pane and the agents' terminals; the root checks keep links from straying, they
+do not make the app safe to share.
+
+Previews cap text reads at 512 KiB and disclose truncation. HTML retains the
+existing opaque-origin sandbox and starts with scripts disabled. Missing files,
+unknown locations and unavailable remote files have explicit error states.
 
 Plain terminal detection is intentionally conservative: whitespace and surrounding
 punctuation delimit paths, and wrapped scans are bounded. Use an explicit OSC 8
