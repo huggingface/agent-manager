@@ -2181,6 +2181,9 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     trustCodexWorkspace(realWork);
     dismissCodexUpdatePrompt(cliVersion('codex'));
   }
+  if (session.cli === 'claude' && session.everStarted && session.sessionUuid) {
+    recoverClaudeTranscript(session, realWork);
+  }
   // The login shell knows its own PTY-root pid before any `exec`. Adapters use
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the
@@ -3145,23 +3148,136 @@ export function stop(id) {
   try { host.pty.kill(); } catch {}
 }
 
+function findClaudeTranscriptIn(projectsRoot, uuid, preferredSlug) {
+  const name = `${uuid}.jsonl`;
+  const check = (slug) => {
+    if (!slug) return null;
+    const file = path.join(projectsRoot, slug, name);
+    try {
+      const st = fs.statSync(file);
+      if (st.isFile() && st.size > 0) return { file, slug, st };
+    } catch {}
+    return null;
+  };
+  const direct = check(preferredSlug);
+  if (direct) return direct;
+  let entries;
+  try { entries = fs.readdirSync(projectsRoot, { withFileTypes: true }); } catch { return null; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === preferredSlug) continue;
+    const hit = check(entry.name);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * If a started Claude session's local `<sessionUuid>.jsonl` is missing (for
+ * example after Claude Code's 30-day retention sweep deleted it on an earlier
+ * run) while `$CLAUDE_DURABLE/projects` still holds the checkpointed copy,
+ * restore that file before launch. Without this, `commandFor()` sees no local
+ * transcript and starts `--session-id <uuid>` fresh, whose new empty `.jsonl`
+ * overwrites the durable bucket copy on the next `agent-state.sh` checkpoint.
+ */
+export function recoverClaudeTranscript(
+  session,
+  workdir = path.join(WORKSPACES_DIR, session?.path ?? session?.id ?? ''),
+) {
+  const uuid = session?.sessionUuid;
+  if (!session || session.cli !== 'claude' || !session.everStarted || !UUID.test(uuid || '')) return null;
+  const localBase = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
+  const durableBase = process.env.CLAUDE_DURABLE || path.join(DATA_DIR, 'state', 'claude');
+  const localProjects = path.join(localBase, 'projects');
+  const durableProjects = path.join(durableBase, 'projects');
+  if (path.resolve(localProjects) === path.resolve(durableProjects)) return null;
+
+  const preferredSlug = String(workdir || '').replace(/[^a-zA-Z0-9-]/g, '-');
+  if (findClaudeTranscriptIn(localProjects, uuid, preferredSlug)) return null;
+
+  const durableHit = findClaudeTranscriptIn(durableProjects, uuid, preferredSlug);
+  if (!durableHit) return null;
+
+  const dstDir = path.join(localProjects, durableHit.slug);
+  const dstFile = path.join(dstDir, `${uuid}.jsonl`);
+  const tmpFile = path.join(dstDir, `.${uuid}.jsonl.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.mkdirSync(dstDir, { recursive: true });
+    fs.copyFileSync(durableHit.file, tmpFile);
+    try { fs.utimesSync(tmpFile, durableHit.st.atime, durableHit.st.mtime); } catch {}
+    fs.renameSync(tmpFile, dstFile);
+    console.log(`[claude] ${session.id}: recovered transcript ${uuid}.jsonl from durable state before launch`);
+    return dstFile;
+  } catch (e) {
+    try { fs.unlinkSync(tmpFile); } catch {}
+    console.warn(`[claude] ${session.id}: could not recover ${uuid}.jsonl from durable state: ${e && e.message}`);
+    return null;
+  }
+}
+
+export const DEFAULT_STOP_ALL_TIMEOUT_MS = 8000;
+
+function processGroupAlive(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+async function waitForHostDrain(host, pgid, deadline) {
+  await Promise.allSettled([host.exitPromise]);
+  // Non-`exec` launch lines (`claude --session-id … || exec claude`) leave
+  // `bash -lc` as the PTY leader (`pid === pgid`). On SIGHUP `bash` can exit
+  // immediately while the child CLI in the same process group is still
+  // flushing its transcript; wait until the whole process group has exited.
+  while (processGroupAlive(pgid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 /**
  * Kill every session. Without tmux nothing outlives this process, so a clean
  * shutdown should not leave orphaned PTYs behind holding the workspace.
  */
-export async function stopAll(timeoutMs = 1000) {
-  const active = [...hosts.values()];
-  for (const host of active) {
+export async function stopAll(
+  timeoutMs = Number(process.env.AM_STOP_ALL_TIMEOUT_MS) || DEFAULT_STOP_ALL_TIMEOUT_MS,
+) {
+  const active = [...hosts.values()].map((host) => ({ host, pgid: host.pty?.pid }));
+  for (const { host } of active) {
     try { host.pty.kill(); } catch {}
   }
   if (!active.length) return;
 
   // Give each CLI a bounded chance to handle SIGHUP, close its transcript, and
   // flush final local state before PID 1 takes the shutdown checkpoint.
+  const deadline = Date.now() + timeoutMs;
   let timer;
   await Promise.race([
-    Promise.allSettled(active.map((host) => host.exitPromise)),
+    Promise.allSettled(active.map(({ host, pgid }) => waitForHostDrain(host, pgid, deadline))),
     new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
   ]);
   if (timer) clearTimeout(timer);
+
+  // `term.onExit` triggers `historyCheckpoint.flush()` without awaiting its
+  // async write+rename (and then destroys `host.vt`), whereas any CLI that
+  // exceeded `timeoutMs` is still in `hosts` and has not flushed yet. Flush
+  // still-live hosts and await in-flight writes on exited hosts before
+  // `process.exit(0)` in index.js can tear them down.
+  let flushTimer;
+  const flushBudgetMs = Math.min(2000, Math.max(250, timeoutMs));
+  await Promise.race([
+    Promise.allSettled(active.map(({ host }) => {
+      try {
+        return hosts.has(host.id)
+          ? host.historyCheckpoint?.flush()
+          : host.historyCheckpoint?.settled();
+      } catch {
+        return undefined;
+      }
+    })),
+    new Promise((resolve) => { flushTimer = setTimeout(resolve, flushBudgetMs); }),
+  ]);
+  if (flushTimer) clearTimeout(flushTimer);
 }

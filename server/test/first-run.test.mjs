@@ -171,15 +171,28 @@ test('versions compare by number, not by string', () => {
 
 // ---- the bypass warning, in the file the app already owns ----
 
-test('the bypass-mode warning is answered once and grants nothing', () => {
+test('the bypass-mode warning and transcript retention are set once and grant nothing', () => {
   const settings = path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
   fs.writeFileSync(settings, JSON.stringify({ hooks: { SessionStart: ['keep'] } }));
   assert.equal(fr.ensureClaudeDialogDefaults(), true);
   const cfg = readJson(settings);
   assert.equal(cfg.skipDangerousModePermissionPrompt, true);
+  assert.equal(cfg.cleanupPeriodDays, fr.CLAUDE_CLEANUP_PERIOD_DAYS);
   assert.deepEqual(cfg.hooks.SessionStart, ['keep']);
   assert.equal(cfg.permissions, undefined, 'permission mode is not touched');
   assert.equal(fr.ensureClaudeDialogDefaults(), false, 'idempotent');
+});
+
+test('an existing settings.json with skipDangerousModePermissionPrompt still gets cleanupPeriodDays, without clobbering explicit user retention', () => {
+  const settings = path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
+  fs.writeFileSync(settings, JSON.stringify({ skipDangerousModePermissionPrompt: true }));
+  assert.equal(fr.ensureClaudeDialogDefaults(), true, 'adds cleanupPeriodDays when missing');
+  assert.equal(readJson(settings).cleanupPeriodDays, fr.CLAUDE_CLEANUP_PERIOD_DAYS);
+
+  fs.writeFileSync(settings, JSON.stringify({ skipDangerousModePermissionPrompt: true, cleanupPeriodDays: 365 }));
+  const before = fs.readFileSync(settings, 'utf8');
+  assert.equal(fr.ensureClaudeDialogDefaults(), false, 'explicit cleanupPeriodDays is respected');
+  assert.equal(fs.readFileSync(settings, 'utf8'), before);
 });
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));

@@ -42,7 +42,8 @@ export function createTerminalHistoryCheckpoint({
 }) {
   let timer = null;
   let pending = null;
-  let writing = false;
+  let writing = null;
+  let seq = 0;
   let lastBody = persistedBody;
 
   const writePending = () => {
@@ -50,22 +51,26 @@ export function createTerminalHistoryCheckpoint({
     const next = pending;
     pending = null;
     if (next === lastBody) return;
-    writing = true;
     const target = fileFor(directory, id);
-    const temporary = `${target}.${process.pid}.tmp`;
-    fs.promises.mkdir(directory, { recursive: true })
+    // Leading dot keeps `target` (`<id>.json`) from being a strict prefix of
+    // the temp name — on hf-mount (#207), writing `foo.tmp` while `foo` is
+    // uncached makes `stat("foo")` report a phantom directory until rename.
+    const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.${++seq}.tmp`);
+    writing = fs.promises.mkdir(directory, { recursive: true })
       .then(() => fs.promises.writeFile(temporary, next))
       .then(() => fs.promises.rename(temporary, target))
       .then(() => { lastBody = next; })
       .catch((error) => {
         console.error('[runner] history checkpoint', error && error.message);
-        fs.promises.unlink(temporary).catch(() => {});
+        return fs.promises.unlink(temporary).catch(() => {});
       })
       .finally(() => {
-        writing = false;
+        writing = null;
         if (pending) writePending();
       });
   };
+
+  const waitIdle = () => (writing ? writing.then(waitIdle) : Promise.resolve());
 
   const schedule = () => {
     if (timer) return;
@@ -75,18 +80,19 @@ export function createTerminalHistoryCheckpoint({
 
   const flush = () => {
     if (timer) { clearTimeout(timer); timer = null; }
-    if (blocked()) { schedule(); return; }
+    if (blocked()) { schedule(); return waitIdle(); }
     let snap;
-    try { snap = snapshot(); } catch { return; }
+    try { snap = snapshot(); } catch { return waitIdle(); }
     const lines = (snap.scrollbackLines || []).map((line) => {
       const text = line.text || '';
       return validAnsi(line.ansi, text) ? { text, ansi: line.ansi } : text;
     });
     pending = JSON.stringify({ version: TERMINAL_HISTORY_VERSION, cols: snap.cols, lines });
     writePending();
+    return waitIdle();
   };
 
-  return { schedule, flush };
+  return { schedule, flush, settled: waitIdle };
 }
 
 const normalText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
