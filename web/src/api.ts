@@ -94,14 +94,14 @@ export const deleteSession = (id: string) =>
 export const renameSession = (id: string, name: string) =>
   fetch(`/api/sessions/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);
 
-export const createGroup = (name: string): Promise<Group> =>
-  fetch('/api/groups', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);
+export const createGroup = (name: string, path?: string): Promise<Group> =>
+  fetch('/api/groups', { method: 'POST', headers: HEADERS, body: JSON.stringify(path !== undefined ? { name, path } : { name }) }).then(json);
 
 export const renameGroup = (id: string, name: string) =>
   fetch(`/api/groups/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);
 
 // Generic group patch: pane order (sessionIds) and/or tile layout (null = auto).
-export const updateGroup = (id: string, patch: { sessionIds?: string[]; layout?: { cols: number; rows: number } | null }) =>
+export const updateGroup = (id: string, patch: { sessionIds?: string[]; layout?: { cols: number; rows: number } | null; path?: string | null }) =>
   fetch(`/api/groups/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify(patch) }).then(json);
 
 export const deleteGroup = (id: string) =>

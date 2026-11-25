@@ -20,7 +20,7 @@ import { createRequestPolicy, requestAdmission, terminalUpgrade, REQUEST_HEADERS
 import { frameAncestors, frameAncestorOrigins } from './framing.js';
 import {
   PORT, BIND_HOST, INTERNAL_HOST, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, STATE_DIR,
-  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote, launchChoice,
+  ensureDirs, cliCatalog, cliById, slugify, workspacePath, cleanRelPath, refreshVersions, PASSIVE_CLIS, isRemote, launchChoice,
 } from './config.js';
 import { startModelCatalog, launchOptions, refreshModelLists, checkLaunchChoice } from './model-catalog.js';
 import { createSkillsService, skillTargetDirs } from './skills.js';
@@ -133,6 +133,9 @@ for (const s of store.list()) {
 function ensureWorkspaceFolders() {
   for (const s of store.list()) {
     if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
+  }
+  for (const g of groups.list()) {
+    if (g.path) { try { fs.mkdirSync(workspacePath(g.path), { recursive: true }); } catch {} }
   }
 }
 ensureWorkspaceFolders();
@@ -1397,13 +1400,19 @@ api.post('/api/agents', promptBody, async (req, res) => {
   if (!cat.available) return res.status(400).json({ error: `${def.label} is not installed here` });
   const prompt = bodyText(req, 'prompt');
   if (!prompt) return res.status(400).json({ error: 'a spawned agent needs a task — send the prompt as the request body' });
-  // Default to the caller's own folder: peers usually work on the same thing.
-  const where = typeof q.path === 'string' && q.path.trim() ? q.path : (from.session.path ?? from.session.id);
   // …and into the caller's own group, by the same reasoning: a peer spawned to
   // work alongside you belongs beside you in the sidebar, not loose at the top
   // of it. ?group= overrides (id or display name); ?group=none opts out.
   const g = groups.resolveSpawnGroup(q.group, from.session.id);
   if (g.error) return res.status(400).json({ error: g.error });
+  // Default to the caller's own folder: peers usually work on the same thing.
+  // When a root-level caller (path: '') spawns into a group with a non-empty
+  // effectivePath, inherit the group's folder instead of the workspaces root.
+  const callerPath = from.session.path ?? from.session.id;
+  const groupFolder = g.groupId ? groups.effectivePath(g.groupId) : undefined;
+  const where = typeof q.path === 'string' && q.path.trim()
+    ? q.path
+    : (callerPath === '' && groupFolder ? groupFolder : callerPath);
   const creation = {
     name: typeof q.name === 'string' ? q.name : '',
     cli,
@@ -3194,18 +3203,7 @@ api.post('/api/files/:id/upload', async (req, res) => {
   }
 });
 
-// Sanitize a client-supplied workspace-relative path: no '..', no absolute
-// paths, must resolve under WORKSPACES_DIR. Returns the normalized relative
-// path ('' = the workspaces root), or null if invalid.
-function cleanRelPath(p) {
-  if (typeof p !== 'string') return null;
-  const parts = p.split('/').map((s) => s.trim()).filter((s) => s && s !== '.');
-  if (parts.some((s) => s === '..')) return null;
-  const rel = parts.join('/');
-  const abs = path.resolve(WORKSPACES_DIR, rel);
-  if (abs !== WORKSPACES_DIR && !abs.startsWith(WORKSPACES_DIR + path.sep)) return null;
-  return rel;
-}
+export { cleanRelPath };
 
 // Folder listing for the location picker (subfolders of one level).
 api.get('/api/folders', (req, res) => {
@@ -3984,8 +3982,33 @@ api.delete('/api/sessions/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+api.get('/api/groups', (_req, res) => res.json(groups.list()));
+
 api.post('/api/groups', (req, res) => {
-  const g = groups.create((req.body || {}).name);
+  const b = req.body || {};
+  let groupPath;
+  if (b.path !== undefined && b.path !== null) {
+    if (typeof b.path !== 'string') return res.status(400).json({ error: 'bad path' });
+    groupPath = cleanRelPath(b.path);
+    if (groupPath === null) return res.status(400).json({ error: 'bad path' });
+  }
+  let g = groups.create(b.name, groupPath !== undefined ? { path: groupPath } : undefined);
+  if (Array.isArray(b.sessionIds) || b.layout !== undefined) {
+    if (Array.isArray(b.sessionIds)) {
+      for (const sid of b.sessionIds) order.drop(`s:${sid}`);
+    }
+    g = groups.update(g.id, { sessionIds: b.sessionIds, layout: b.layout }) || g;
+  }
+  if (groupPath === undefined && g.sessionIds.length > 0) {
+    const shared = [...new Set(
+      g.sessionIds
+        .map((id) => store.get(id))
+        .filter((s) => s && !PASSIVE_CLIS.includes(s.cli) && typeof s.path === 'string' && s.path)
+        .map((s) => s.path),
+    )];
+    if (shared.length === 1) g = groups.update(g.id, { path: shared[0] }) || g;
+  }
+  if (g.path) { try { fs.mkdirSync(workspacePath(g.path), { recursive: true }); } catch {} }
   order.prepend(`g:${g.id}`);
   res.status(201).json(g);
 });
@@ -3993,7 +4016,16 @@ api.post('/api/groups', (req, res) => {
 api.put('/api/groups/:id', (req, res) => {
   const existing = groups.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  res.json(groups.update(existing.id, { ...(req.body || {}) }));
+  const b = req.body || {};
+  let nextPath = b.path;
+  if (nextPath !== undefined && nextPath !== null) {
+    if (typeof nextPath !== 'string') return res.status(400).json({ error: 'bad path' });
+    nextPath = cleanRelPath(nextPath);
+    if (nextPath === null) return res.status(400).json({ error: 'bad path' });
+  }
+  const updated = groups.update(existing.id, { ...b, path: nextPath });
+  if (updated?.path) { try { fs.mkdirSync(workspacePath(updated.path), { recursive: true }); } catch {} }
+  res.json(updated);
 });
 
 api.delete('/api/groups/:id', (req, res) => {

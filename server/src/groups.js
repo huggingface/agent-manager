@@ -1,6 +1,6 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, PASSIVE_CLIS } from './config.js';
 import { findByName, normalizeName } from './agent-list.js';
 import { createJsonStore } from './json-store.js';
 import * as sessions from './sessions.js';
@@ -63,12 +63,13 @@ export function get(id) {
   return groups.find((g) => g.id === id) || null;
 }
 
-export function create(name) {
+export function create(name, { path: groupPath } = {}) {
   const clean = (name || '').trim() || 'Group';
   const g = {
     id: `g-${crypto.randomBytes(3).toString('hex')}`,
     name: clean,
     sessionIds: [],
+    ...(typeof groupPath === 'string' ? { path: groupPath } : {}),
     createdAt: new Date().toISOString(),
   };
   groups.push(g);
@@ -76,10 +77,14 @@ export function create(name) {
   return g;
 }
 
-export function update(id, { name, sessionIds, layout }) {
+export function update(id, { name, sessionIds, layout, path: groupPath } = {}) {
   const g = get(id);
   if (!g) return null;
   if (typeof name === 'string' && name.trim()) g.name = name.trim();
+  if (groupPath !== undefined) {
+    if (groupPath === null) delete g.path;
+    else if (typeof groupPath === 'string') g.path = groupPath;
+  }
   // Tile layout: {cols, rows} each 1..3; anything else (incl. null) = auto.
   if (layout !== undefined) {
     const ok = layout && Number.isInteger(layout.cols) && Number.isInteger(layout.rows)
@@ -98,6 +103,25 @@ export function update(id, { name, sessionIds, layout }) {
   }
   persist();
   return g;
+}
+
+/**
+ * Effective workspace-relative folder for a group: its stored `g.path` if defined,
+ * else the non-empty `path` of its non-passive member sessions, else `undefined`.
+ */
+export function effectivePath(groupOrId) {
+  const g = typeof groupOrId === 'string' ? get(groupOrId) : groupOrId;
+  if (!g) return undefined;
+  if (typeof g.path === 'string') return g.path;
+  if (Array.isArray(g.sessionIds) && g.sessionIds.length > 0) {
+    for (const sid of g.sessionIds) {
+      const s = sessions.get(sid);
+      if (s && !PASSIVE_CLIS.includes(s.cli) && typeof s.path === 'string' && s.path) {
+        return s.path;
+      }
+    }
+  }
+  return undefined;
 }
 
 // Pinned is a standing choice about where the group sits and whether its

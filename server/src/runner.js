@@ -799,6 +799,21 @@ export function cwdUnderWorkdir(cwd, workdir) {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
+// Whether two session working directories overlap for folder-scan re-pinning.
+// A session running at the workspaces root (`path: ""`) only overlaps another
+// session also running at the workspaces root — it must not claim every
+// isolated project folder `/data/workspaces/<slug>` across the whole Space.
+// Proper subdirectories keep tree containment so a project folder and its
+// nested git worktree still count as overlapping.
+export function foldersOverlap(a, b, root = WORKSPACES_DIR) {
+  if (typeof a !== 'string' || !a || typeof b !== 'string' || !b) return false;
+  const ra = path.resolve(a);
+  const rb = path.resolve(b);
+  const rr = typeof root === 'string' && root ? path.resolve(root) : null;
+  if (rr && (ra === rr || rb === rr)) return ra === rb;
+  return cwdUnderWorkdir(ra, rb) || cwdUnderWorkdir(rb, ra);
+}
+
 // ---------- Codex conversation pinning ----------
 // Codex picks its own conversation id at launch and doesn't accept one up
 // front. The managed SessionStart hook below is the primary source of its exact
@@ -1236,11 +1251,11 @@ export async function claudeCandidate(sessionId, workdir, sinceMs) {
 // workspaces root is — is exactly as ambiguous as one in the same directory.
 // Refusing here costs nothing where it fires: the breadcrumb path is unaffected,
 // and it is the mechanism now — the scan is its backstop.
-function folderIsShared(sessionId, workdir, cli) {
+export function folderIsShared(sessionId, workdir, cli) {
   return list().some((s) => {
     if (s.id === sessionId || s.cli !== cli || !isRunning(s.id)) return false;
     const other = path.join(WORKSPACES_DIR, s.path ?? s.id);
-    return cwdUnderWorkdir(other, workdir) || cwdUnderWorkdir(workdir, other);
+    return foldersOverlap(other, workdir, WORKSPACES_DIR);
   });
 }
 

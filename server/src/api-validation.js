@@ -143,6 +143,7 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
       text(b.name, 'name');
     } else if (route === '/api/groups' || route === '/api/groups/:id') {
       optional(b, 'name', text, { empty: route === '/api/groups' });
+      if (b.path !== undefined && b.path !== null) pathText(b.path, 'path');
       optional(b, 'sessionIds', strings);
       b.sessionIds?.forEach((id) => exists(id, 'sessionIds', sessionExists));
       if (b.layout !== undefined && b.layout !== null) {
