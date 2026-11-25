@@ -1,17 +1,26 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
 import { findByName, normalizeName } from './agent-list.js';
+import { createJsonStore } from './json-store.js';
 import * as sessions from './sessions.js';
 
 const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
+const store = createJsonStore(GROUPS_FILE, {
+  empty: () => [],
+  validate(parsed) {
+    if (!Array.isArray(parsed)) throw new TypeError('groups.json must contain a JSON array');
+    return parsed;
+  },
+});
 let groups = [];
 
+export const isPoisoned = () => store.isPoisoned();
+
 function persist() {
-  const tmp = `${GROUPS_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(groups, null, 2));
-  fs.renameSync(tmp, GROUPS_FILE);
+  try {
+    store.save(groups);
+  } catch (e) { console.error('[groups.persist]', e && e.message); }
 }
 
 // Groups are purely VISUAL: sidebar organization + tiling. They own no folder —
@@ -40,12 +49,7 @@ function clearMemberPins(ids) {
 }
 
 export function init() {
-  try {
-    groups = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
-    if (!Array.isArray(groups)) groups = [];
-  } catch {
-    groups = [];
-  }
+  groups = store.load();
   // Records written before membership cleared pins can still carry one. Fix
   // them on load rather than leaving a pin that springs back on the way out.
   for (const g of groups) clearMemberPins(g.sessionIds || []);

@@ -246,7 +246,7 @@ try {
   console.log('\na write that fails is not published as read');
   {
     // The reviewer's reproduction: make the marker file unwritable by putting a
-    // directory where its temp file goes. The acknowledgement must fail AND the
+    // directory where renameSync lands. The acknowledgement must fail AND the
     // reply must still read as unread — publishing it from memory while the
     // bytes never landed is the failure this whole feature exists to avoid.
     const c = await mkRemote('gamma');
@@ -255,8 +255,10 @@ try {
     await say('gamma', 'second, unread');
     const before = await metaFor(c.id);
     check('unread to begin with', unread(before));
-    const blocker = path.join(DATA_DIR, 'read-marks.json.tmp');
-    fs.mkdirSync(blocker, { recursive: true });
+    const marksFile = path.join(DATA_DIR, 'read-marks.json');
+    const savedMarks = fs.readFileSync(marksFile);
+    fs.unlinkSync(marksFile);
+    fs.mkdirSync(marksFile);
     let failed = false;
     try {
       const r = await ack([{ id: c.id, ...before.output }]);
@@ -265,7 +267,8 @@ try {
     check('the acknowledgement does not report success', failed);
     check('and the reply is STILL unread', unread(await metaFor(c.id)),
       'a failed write must not be published from memory');
-    fs.rmSync(blocker, { recursive: true, force: true });
+    fs.rmdirSync(marksFile);
+    fs.writeFileSync(marksFile, savedMarks);
     // The retry must actually write, not take an "already there" shortcut off
     // the in-memory copy the failed attempt left behind.
     const again = await metaFor(c.id);

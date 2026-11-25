@@ -89,8 +89,10 @@ refreshVersions();
 startModelCatalog();
 store.init();
 crons.init();
-pruneAttachmentDirs(store.list().map((session) => session.id))
-  .catch((e) => console.error('[attachments.prune]', e && e.message));
+if (!store.isPoisoned()) {
+  pruneAttachmentDirs(store.list().map((session) => session.id))
+    .catch((e) => console.error('[attachments.prune]', e && e.message));
+}
 groups.init();
 order.init();
 demo.init();
@@ -780,7 +782,9 @@ api.get('/api/meta', async (req, res) => {
     readMarks.baseline(new Map(sessions.filter((s) => s.output).map((s) => [s.id, s.output])));
     for (const s of sessions) s.read = readMarks.get(s.id);
   }
-  readMarks.retain(new Set(store.list().map((s) => s.id)));
+  if (!store.isPoisoned()) {
+    readMarks.retain(new Set(store.list().map((s) => s.id)));
+  }
   res.json({ sessions, generatedAt: new Date().toISOString() });
 });
 
@@ -3242,14 +3246,18 @@ api.get('/api/tree', (_req, res) => {
     ...groupList.map((g) => ({ ref: `g:${g.id}`, t: g.createdAt || '' })),
     ...loose.map((s) => ({ ref: `s:${s.id}`, t: s.createdAt })),
   ].sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0)); // newest first
-  order.normalize(refsMeta.map((x) => x.ref));
+  if (!store.isPoisoned() && !groups.isPoisoned()) {
+    order.normalize(refsMeta.map((x) => x.ref));
+  }
   let orderList = order.list();
   // Overview-hidden refs, pruned against everything that still exists — every
   // group and EVERY session, before demo mode narrows the view (see hidden.js).
-  hidden.retain(new Set([
-    ...groupList.map((g) => `g:${g.id}`),
-    ...store.list().map((s) => `s:${s.id}`),
-  ]));
+  if (!store.isPoisoned() && !groups.isPoisoned()) {
+    hidden.retain(new Set([
+      ...groupList.map((g) => `g:${g.id}`),
+      ...store.list().map((s) => `s:${s.id}`),
+    ]));
+  }
   const hiddenRefs = hidden.list();
   // Demo mode hides the snapshotted sessions/groups from the view (sessions
   // created after activation aren't in the snapshot, so they show through).
