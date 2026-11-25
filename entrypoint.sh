@@ -187,6 +187,16 @@ PRUNE_PID=$!
 
 # Small comforts in OpenClaw's private HOME (harmless if missing).
 cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
+# Keep Hugging Face Hub model/dataset downloads off the container's ephemeral
+# local disk (critical once live HOME moves off /data/home), and carry over any
+# saved `hf auth login` token files from the legacy /data/home/.cache path.
+export HF_HOME="${HF_HOME:-$DATA_DIR/cache/huggingface}"
+mkdir -p "$HF_HOME" 2>/dev/null || true
+for _hf_tok in token stored_tokens; do
+  if [ -f "$DATA_DIR/home/.cache/huggingface/$_hf_tok" ] && [ ! -e "$HF_HOME/$_hf_tok" ]; then
+    cp -p "$DATA_DIR/home/.cache/huggingface/$_hf_tok" "$HF_HOME/$_hf_tok" 2>/dev/null || true
+  fi
+done
 export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
 export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
 export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast

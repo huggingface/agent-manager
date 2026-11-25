@@ -1116,18 +1116,20 @@ for line in open(plan):
 # EMPTY directory $3. Fails with the reason in $_why.
 mirror_attempt() {
   _key="$1" _prefix="$2" _mirror="$3" _end="$4"
-  _rules="$MIRROR_ROOT/$_key.filters" _plan="$MIRROR_ROOT/$_key.plan.jsonl"
-  rm -rf "${_mirror:?}" "$_plan"
-  mkdir -p "$_mirror"
-  mirror_filters "$_key" "$_prefix" "$_end" > "$_rules" || return 1
+  _rules="$MIRROR_ROOT/$_key.filters" _plan="$MIRROR_ROOT/$_key.plan.jsonl" _xet="$MIRROR_ROOT/.xet-cache/$_key"
+  rm -rf "${_mirror:?}" "$_plan" "${_xet:?}"
+  mkdir -p "$_mirror" "$_xet"
+  mirror_filters "$_key" "$_prefix" "$_end" > "$_rules" || { rm -rf "${_xet:?}"; return 1; }
   # Plan, then apply the plan: the plan carries each file's bucket mtime, which
-  # the download itself does not set.
-  bounded "fetching over the API (plan)" "$_end" hf buckets sync "hf://buckets/$_prefix" "$_mirror" \
+  # the download itself does not set. Keep hf_xet's chunk cache in local mirror
+  # scratch so boot sync never writes Xet chunks onto a FUSE HF_HOME.
+  bounded "fetching over the API (plan)" "$_end" env HF_XET_CACHE="$_xet" hf buckets sync "hf://buckets/$_prefix" "$_mirror" \
     --filter-from "$_rules" --plan "$_plan" --quiet >/dev/null 2>"$_plan.err" \
-    && bounded "fetching over the API (download)" "$_end" hf buckets sync --apply "$_plan" --quiet \
+    && bounded "fetching over the API (download)" "$_end" env HF_XET_CACHE="$_xet" hf buckets sync --apply "$_plan" --quiet \
       >/dev/null 2>>"$_plan.err" \
     && bounded "fetching over the API (mtimes)" "$_end" python3 -c "$SET_MTIMES" "$_plan" "$_mirror" 2>>"$_plan.err"
   _rc=$?
+  rm -rf "${_xet:?}"
   [ "$_rc" -eq 0 ] && return 0
   if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 137 ]; then _why="timed out after ${API_TIMEOUT}s"
   else _why="exit $_rc: $(tail -n 1 "$_plan.err")"; fi
@@ -1148,6 +1150,9 @@ mirror_tree() {
     rm -rf "${_m:?}"
     # Out of budget: no retry, and no fallback either (restore_source).
     [ -e "$WORK/exhausted.$KEY" ] && { echo "$_why" >&2; return 1; }
+    # Out of local disk: retrying another full mirror into $AM_LOCAL will fail
+    # the same way; fall straight back to streaming from $DATA_DIR (0 mirror bytes).
+    case "$_why" in *"No space left on device"*|*"ENOSPC"*) echo "$_why" >&2; return 1 ;; esac
     [ "$_try" -ge 2 ] && { echo "$_why" >&2; return 1; }
     log "$_key: bucket transfer failed, retrying ($_why)" >&3
     _try=$((_try + 1))
@@ -1234,7 +1239,11 @@ restore_adapter() {
       return "$_rc" ;;
   esac
   SRC_DESC="the API mirror"
-  "restore_$1" "$_src"
+  "restore_$1" "$_src"; _rc=$?
+  # Reclaim this adapter's API mirror immediately rather than holding every
+  # adapter's mirror on $AM_LOCAL until the entire boot restore finishes.
+  rm -rf "${MIRROR_ROOT:?}/${1:?}"
+  return "$_rc"
 }
 
 # One adapter, start to finish, with its own progress lines. In a dry run its

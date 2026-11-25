@@ -1540,7 +1540,7 @@ export default function App() {
         {/* Visible where you already are, on every view. Rides on /api/info,
             which is polled every 15s, so no new request for the normal case. */}
         {noBucket && !showBucket && <NoBucketBanner onShow={() => { setSettingsOpen(false); setBucketAsked(true); }} />}
-        {(info?.backup || info?.checkpoint) && <Suspense><HealthBanners backup={info.backup} checkpoint={info.checkpoint} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
+        {(info?.backup || info?.checkpoint || info?.disk) && <Suspense><HealthBanners backup={info.backup} checkpoint={info.checkpoint} disk={info.disk} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
         <div className="stage">
           {renderTiles(
             isMobile && !mobileStage

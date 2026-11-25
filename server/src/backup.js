@@ -106,7 +106,7 @@ export const DEFAULT_EXCLUDE = Object.freeze([
   // dependency trees
   'node_modules', '.venv', 'venv', 'site-packages', '.lake/packages', '.pnpm-store',
   // caches, by manager
-  '.cache', '.npm/_cacache', '.npm/_npx', '.yarn/cache', '.cargo/registry', 'pkg/mod',
+  '.cache', 'cache/huggingface', '.npm/_cacache', '.npm/_npx', '.yarn/cache', '.cargo/registry', 'pkg/mod',
   '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.ipynb_checkpoints',
   '.gradle/caches', '.m2/repository', '.deno', '.bun/install/cache', '.turbo', '.next',
   // toolchains an installer re-fetches

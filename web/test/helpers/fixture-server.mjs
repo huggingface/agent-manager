@@ -58,6 +58,7 @@ export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-',
       // Its own "local disk": inside a running Space the inherited one holds the
       // live checkpoint status, which would put the real Space's warning here.
       AM_LOCAL: path.join(dataDir, 'local'),
+      AM_DISK_WARN_BYTES: base.AM_DISK_WARN_BYTES ?? '0',
       AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1', USE_TMUX: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

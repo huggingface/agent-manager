@@ -56,6 +56,7 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import { checkpointHealth } from './checkpoint-health.js';
+import { diskHealth, startDiskHealthMonitor } from './disk-health.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -1609,7 +1610,7 @@ const NON_SECRET = new Set([
   'AGENT_STATE_SCRIPT', 'AGENT_STATE_CHECKPOINT_SECONDS', 'DATA_DIR',
   'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
-  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE',
+  'HF_HOME', 'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE',
 ]);
 const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_', 'AM_'];
 function injectedEnvKeys() {
@@ -1704,6 +1705,9 @@ api.get('/api/info', (_req, res) => res.json({
   // is being saved, otherwise the adapters that are not and why. Read from
   // local status files. Withheld while locked: the reason names file paths.
   checkpoint: isLocked() ? null : checkpointHealth(),
+  // Local disk headroom (server/src/disk-health.js): null while >= 10 GiB is
+  // free and next-boot restore headroom is safe; cached from an async probe.
+  disk: isLocked() ? null : diskHealth(),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -4230,6 +4234,7 @@ setTimeout(() => { traceDigests().catch(() => {}); }, 4000);
 // Job to do it on the Hub (docs/bucket-backup.md). Costs nothing when off or
 // when there is no HF_TOKEN — it reads the config and returns.
 backup.startBackupTimer(loadAmConfig);
+startDiskHealthMonitor();
 
 // Off-thread stall detector — must start early so it's watching before the
 // first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
