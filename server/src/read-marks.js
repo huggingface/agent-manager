@@ -1,6 +1,6 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { createJsonStore } from './json-store.js';
 
 // What the operator has already read.
 //
@@ -24,29 +24,33 @@ import { DATA_DIR } from './config.js';
 //          the newer one has not been read.
 
 const FILE = path.join(DATA_DIR, 'read-marks.json');
-let state = { initialized: false, marks: {} };
+const emptyState = () => ({ initialized: false, marks: {} });
+const store = createJsonStore(FILE, {
+  empty: emptyState,
+  validate(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new TypeError('read-marks.json must contain a JSON object');
+    }
+    return {
+      initialized: !!parsed.initialized,
+      marks: parsed.marks && typeof parsed.marks === 'object' && !Array.isArray(parsed.marks) ? parsed.marks : {},
+    };
+  },
+});
+let state = emptyState();
+
+export const isPoisoned = () => store.isPoisoned();
 
 // Write first, adopt second. The in-memory copy is what /api/meta answers from,
 // so promoting it before the file lands would publish a reply as read that a
 // restart brings back unread — and the caller would have been told it failed.
 // Nothing here mutates `state` unless the bytes are on disk.
 function commit(next) {
-  const tmp = `${FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
-  fs.renameSync(tmp, FILE);
-  state = next;
+  store.save(next, { onRenamed: () => { state = next; } });
 }
 
 export function init() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    state = {
-      initialized: !!parsed.initialized,
-      marks: parsed.marks && typeof parsed.marks === 'object' ? parsed.marks : {},
-    };
-  } catch {
-    state = { initialized: false, marks: {} };
-  }
+  state = store.load();
 }
 
 /** Has the one-time rollout baseline been taken? */
@@ -130,8 +134,13 @@ export function baseline(latestById) {
   // only once the file holds them. A failed write leaves the baseline untaken,
   // so the next poll retries it rather than starting to track from a moment
   // nothing recorded.
-  commit({ ...state, initialized: true, marks });
-  return true;
+  try {
+    commit({ ...state, initialized: true, marks });
+    return true;
+  } catch (e) {
+    console.error('[read-marks.baseline]', e && e.message);
+    return false;
+  }
 }
 
 /** Drop marks for sessions that no longer exist. Renaming or moving a session
@@ -142,5 +151,8 @@ export function retain(validIds) {
   for (const [id, mark] of Object.entries(state.marks)) {
     if (validIds.has(id)) marks[id] = mark; else changed = true;
   }
-  if (changed) commit({ ...state, marks });
+  if (changed) {
+    try { commit({ ...state, marks }); }
+    catch (e) { console.error('[read-marks.retain]', e && e.message); }
+  }
 }

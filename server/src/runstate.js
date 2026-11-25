@@ -3,6 +3,7 @@ import { codexBindings } from './codex-context.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PASSIVE_CLIS, isRemote } from './config.js';
+import { createJsonStore } from './json-store.js';
 import { list as listSessions, get as getSession } from './sessions.js';
 import { isRunning, paneRootPid, ensureRunning, ghosttyReady, promptReady, hasPromptDetector, runIdOf, launchedThisBoot } from './runner.js';
 import { traceDigests } from './traces.js';
@@ -23,6 +24,18 @@ import { traceDigests } from './traces.js';
 // "revive", not "restore": in this codebase restore already means replaying a
 // terminal's serialized grid to a viewer, which is a different thing entirely.
 const RUNSTATE_FILE = path.join(DATA_DIR, 'runstate.json');
+const store = createJsonStore(RUNSTATE_FILE, {
+  empty: () => null,
+  validate(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || !parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions)) {
+      throw new TypeError('runstate.json must contain a snapshot object with sessions');
+    }
+    return parsed;
+  },
+});
+
+export const isPoisoned = () => store.isPoisoned();
 
 // How often the snapshot is refreshed. Frequent enough that a sleep loses at
 // most half a minute of truth, rare enough to be invisible on the FUSE bucket.
@@ -68,10 +81,8 @@ let settleAt = 0;
 
 /** Load the previous boot's snapshot. Call once, before startRunstateWatch(). */
 export function init() {
-  try {
-    const j = JSON.parse(fs.readFileSync(RUNSTATE_FILE, 'utf8'));
-    previous = j && typeof j === 'object' && j.sessions ? j : null;
-  } catch { previous = null; }
+  previous = store.load();
+  lastWritten = '';
   // Hold the first write for a full cycle from here, whatever happens next. A
   // boot that revives nothing — engine missing, Space still locked, revive
   // switched off — must not answer by wiping the record of what was running:
@@ -141,11 +152,9 @@ export function saveRunstate() {
   const body = JSON.stringify(snap.sessions);
   if (body === lastWritten) return;
   try {
-    const tmp = `${RUNSTATE_FILE}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(snap, null, 2));
-    fs.renameSync(tmp, RUNSTATE_FILE);
-    // Only once it's actually on disk: a FUSE write that threw must be retried
-    // next cycle, not remembered as the state of the file.
+    store.save(snap);
+    // Only once it's actually on disk: a FUSE write that threw (or a poisoned
+    // boot read) must be retried next cycle, not remembered as the state of the file.
     lastWritten = body;
   } catch (e) { console.error('[runstate]', e && e.message); }
 }

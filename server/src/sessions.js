@@ -1,25 +1,28 @@
-import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { dirname } from 'node:path';
 import { SESSIONS_FILE } from './config.js';
+import { createJsonStore } from './json-store.js';
+
+const store = createJsonStore(SESSIONS_FILE, {
+  empty: () => [],
+  validate(parsed) {
+    if (!Array.isArray(parsed)) throw new TypeError('sessions.json must contain a JSON array');
+    return parsed;
+  },
+});
 
 let sessions = [];
 
+export const isPoisoned = () => store.isPoisoned();
+
 function load() {
-  try {
-    sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-    if (!Array.isArray(sessions)) sessions = [];
-  } catch {
-    sessions = [];
-  }
+  sessions = store.load();
 }
 
 function persist() {
-  // A FUSE write hiccup must not throw out of a timer/handler and crash us.
+  // A FUSE write hiccup (or a poisoned boot read) must not throw out of a
+  // timer/handler and crash us; when poisoned, store.save() refuses to clobber.
   try {
-    const tmp = `${SESSIONS_FILE}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(sessions, null, 2));
-    fs.renameSync(tmp, SESSIONS_FILE);
+    store.save(sessions);
   } catch (e) { console.error('[sessions.persist]', e && e.message); }
 }
 
@@ -94,49 +97,30 @@ export function update(id, patch) {
 export function setArchived(id, archived) {
   const current = get(id);
   if (!current) return null;
-  const nextSession = {...current, archivedAt: archived ? new Date().toISOString() : undefined,
-    ...(archived ? {pinnedAt:undefined} : {})};
-  const next = sessions.map(s => s.id === id ? nextSession : s);
-  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
-  let fd;
-  try {
-    fd = fs.openSync(tmp, 'wx', 0o600);
-    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
-    fs.closeSync(fd); fd = undefined;
-    fs.renameSync(tmp, SESSIONS_FILE);
-    sessions = next;
-    fd = fs.openSync(dirname(SESSIONS_FILE), 'r'); fs.fsyncSync(fd);
-    return nextSession;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  }
+  const nextSession = {
+    ...current,
+    archivedAt: archived ? new Date().toISOString() : undefined,
+    ...(archived ? { pinnedAt: undefined } : {}),
+  };
+  const next = sessions.map((s) => (s.id === id ? nextSession : s));
+  store.save(next, { onRenamed: () => { sessions = next; } });
+  return nextSession;
 }
 
 // Imports are references, never fresh agents. Persist the fail-closed launch
 // marker before attempting a separate binding write. A crash between the two
 // writes leaves a repairable reference that cannot start a standalone TUI.
 export function createCodexReference({ name, path, threadId }) {
-  const session = { id: `codex-shared-${crypto.randomBytes(6).toString('hex')}`,
+  const session = {
+    id: `codex-shared-${crypto.randomBytes(6).toString('hex')}`,
     name, path, cli: 'codex', sessionUuid: crypto.randomUUID(),
     codexSessionId: threadId, codexSharedOnly: true, everStarted: true,
-    createdAt: new Date().toISOString() };
+    createdAt: new Date().toISOString(),
+  };
   const next = [...sessions, session];
-  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
-  let fd;
-  try {
-    fd = fs.openSync(tmp, 'wx', 0o600);
-    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
-    fs.closeSync(fd); fd = undefined;
-    fs.renameSync(tmp, SESSIONS_FILE);
-    sessions = next; // Also keep the protective record if directory fsync fails.
-    fd = fs.openSync(dirname(SESSIONS_FILE), 'r');
-    fs.fsyncSync(fd);
-    return session;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  }
+  // Also keep the protective record if directory fsync fails after rename.
+  store.save(next, { onRenamed: () => { sessions = next; } });
+  return session;
 }
 
 export function remove(id) {
@@ -150,14 +134,12 @@ export function remove(id) {
 // Keep the original AM identity, name, folder, group references and history pin.
 // Never acknowledge a migration guard before its durable replacement succeeds.
 export function prepareCodexMigration(id, migration) {
-  const current=get(id);
-  if(!current||current.cli!=='codex'||current.codexSessionId!==migration.threadId)throw Error('Migration identity changed');
-  const session={...current,codexSharedOnly:true,codexMigration:migration};
-  const next=sessions.map(s=>s.id===id?session:s),tmp=`${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
-  let fd;
-  try {
-    fd=fs.openSync(tmp,'wx',0o600);fs.writeFileSync(fd,JSON.stringify(next,null,2));fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
-    fs.renameSync(tmp,SESSIONS_FILE);sessions=next;
-    fd=fs.openSync(dirname(SESSIONS_FILE),'r');fs.fsyncSync(fd);return session;
-  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(tmp);}catch(e){if(e.code!=='ENOENT')throw e;}}
+  const current = get(id);
+  if (!current || current.cli !== 'codex' || current.codexSessionId !== migration.threadId) {
+    throw new Error('Migration identity changed');
+  }
+  const session = { ...current, codexSharedOnly: true, codexMigration: migration };
+  const next = sessions.map((s) => (s.id === id ? session : s));
+  store.save(next, { onRenamed: () => { sessions = next; } });
+  return session;
 }
