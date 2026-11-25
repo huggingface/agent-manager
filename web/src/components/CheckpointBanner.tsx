@@ -2,7 +2,7 @@ import type { CheckpointHealth } from '../api';
 
 const NAMES: Record<string, string> = {
   claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', openclaw: 'OpenClaw',
-  opencode: 'opencode', hermes: 'Hermes', fx: 'fx', antigravity: 'Antigravity',
+  opencode: 'opencode', hermes: 'Hermes', fx: 'fx', antigravity: 'Antigravity', home: 'Home',
 };
 const when = (at: number | null) => (at ? new Date(at).toLocaleString() : null);
 

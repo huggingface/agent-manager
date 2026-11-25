@@ -1614,7 +1614,8 @@ const BUILD_ENV_KEYS = (() => {
 // after the build-time snapshot, so its vars would otherwise be misdetected as
 // injected secrets. Keep this list in sync with entrypoint.sh.
 const NON_SECRET = new Set([
-  'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
+  'HOME', 'AM_DURABLE_HOME', 'AM_LIVE_HOME',
+  'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
   'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
   'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
   'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
@@ -2304,15 +2305,14 @@ alongside plain shells and a file browser.
 
 ## Where you are
 - Your working directory is a **workspace folder** under \`/data/workspaces/\`. Everything you create here is saved.
-- Your home is \`/data/home\` (\`$HOME\`): config, credentials, and shell history persist across restarts.
+- Your live \`$HOME\` (\`$AM_LOCAL/home\`) sits on fast local disk; ordinary dotfiles, credentials, shell history, and skills in \`$HOME\` are restored from and checkpointed to \`/data/home\` (\`$AM_DURABLE_HOME\`) across restarts (caches such as \`~/.cache\` stay local).
 - \`$AM_SESSION\` is your workspace folder (path relative to \`/data/workspaces\`); \`$AM_NAME\` is your display name in the manager; \`$AM_USER\` is the operator.
 
 ## What persists (and what doesn't)
-- \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
+- \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` survive restarts and sleep, and ordinary user config in \`$HOME\` is checkpointed to \`/data/home/…\`.
 - **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
 - Sessions are held by the Agent Manager backend and keep running when the browser disconnects. A backend restart or Space sleep ends live processes; retained workspace files still persist.
-- \`$AM_LOCAL\` (\`/home/node/local\`) is the container's own disk: fast, and **not durable**. A rebuild or a restart wipes it, along with anything you cloned or built there. It is still the right home for git checkouts and build output — see [Git repos](#git-repos-clone-on-local-disk-push-before-you-stop).
-- Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
+- \`$AM_LOCAL\` (\`/home/node/local\`) is the container's own disk: fast, and **not durable** outside the checkpointed agent-state and \`$HOME\` trees. A rebuild or a restart wipes uncheckpointed local checkouts and build output there. It is still the right home for git checkouts and build output — see [Git repos](#git-repos-clone-on-local-disk-push-before-you-stop).
 
 ## You may not be alone
 Manager API writes and remote contact/delivery reads require the non-secret
