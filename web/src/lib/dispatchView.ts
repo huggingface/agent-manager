@@ -2,9 +2,10 @@
 // preview card goes. Only the lazily loaded strip (components/conversation/
 // Dispatches.tsx) imports this, so none of it is in the entry chunk; the rules
 // the reader itself needs at first paint stay in dispatches.ts.
-import { resultOf, type Dispatch, type DispatchResult, type Outcome } from './dispatches';
+import { resultOf, supersede, type Dispatch, type DispatchResult, type Outcome } from './dispatches';
 
 export type Side = 'running' | 'done' | 'failed';
+// Superseded is `done`: the dispatch that took its place carries the outcome.
 const sideOf = (o: Outcome): Side => (o === 'running' || o === 'queued' ? 'running' : o === 'failed' ? 'failed' : 'done');
 
 /** One icon: every dispatch this turn made to one session, rolled up. */
@@ -46,6 +47,9 @@ export function iconsOf(ds: Dispatch[], now = Date.now()): PeerIcon[] {
     if (d.kind === 'launch') p.launched = true;
   }
   for (const p of by.values()) {
+    p.results = supersede(p.results);
+    // The preview reads the latest dispatch that was not made moot by another.
+    p.latest = [...p.results].reverse().find((r) => r.outcome !== 'superseded') || p.results[p.results.length - 1];
     const sides = p.results.map((r) => sideOf(r.outcome));
     p.side = sides.includes('running') ? 'running' : sides.includes('failed') ? 'failed' : 'done';
     const live = p.results.find((r) => sideOf(r.outcome) === 'running');

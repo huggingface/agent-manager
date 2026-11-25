@@ -21,6 +21,7 @@ const plainPrompt = (t: string) => oneLine(t.replace(ENVELOPE, '').replace(/^#+\
 
 const WORD: Record<DispatchResult['outcome'], string> = {
   running: 'running', queued: 'not started yet', finished: 'finished', failed: 'failed', gone: 'deleted', unknown: 'state unknown',
+  superseded: 'superseded',
 };
 
 export function DispatchIcon({ p, size = 12 }: { p: PeerIcon; size?: number }) {
@@ -48,6 +49,8 @@ function Preview({ p }: { p: PeerIcon }) {
       <div className="dx-card-sub mono">
         {first.kind === 'launch' ? 'launched' : 'prompted'} {fmtClock(first.at)}
         {p.results.length > 1 ? ` · ${p.results.length} prompts this turn, latest ${fmtClock(r.d.at)}` : ''}
+        {p.results.filter((x) => x.outcome === 'superseded').map((x) => (
+          <span key={x.d.id} className="dx-moot"> · {fmtClock(x.d.at)} superseded: {x.why}</span>))}
       </div>
       <div className="cx dx-nested">
         <div className="cx-prompt"><div className="markdown cx-pmd dx-clamp">{plainPrompt(r.d.prompt)}</div></div>
