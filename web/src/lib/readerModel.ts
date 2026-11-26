@@ -26,6 +26,16 @@ export const isOperatorPrompt = (t: TraceTurn) => {
 };
 
 /**
+ * Whether a turn list holds the prompt that opened its most recent turn.
+ *
+ * Loaded windows always run to the end of the conversation, so ANY prompt in
+ * them means the latest one is there too. A queued prompt does not count: it is
+ * placed at the end while still waiting, and would otherwise pass for the
+ * prompt of the turn that is actually running above it.
+ */
+export const holdsPrompt = (turns: TraceTurn[]) => turns.some((t) => !t.queued && isOperatorPrompt(t));
+
+/**
  * How many exchanges a reconciled turn list holds — the unit the reader shows
  * and the operator counts, as opposed to transport records, tool results or
  * lifecycle events.

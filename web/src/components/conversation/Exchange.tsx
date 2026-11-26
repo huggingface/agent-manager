@@ -17,7 +17,7 @@ import { Rails } from '../Rails';
 import { renderMarkdown } from '../../lib/markdown';
 import FileLinkContent from '../FileLinkContent';
 import type { Exchange, Step } from './exchanges';
-import { agentSpawnsOf, agentStatus, anyLive, canOpenAgent, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
+import { agentSpawnsOf, agentStatus, anyLive, canOpenAgent, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepKeys, stepSummary, stepText, stepsOf } from './exchanges';
 import type { AgentSpawn, AgentStatus } from './exchanges';
 import ToolCall from './ToolCall';
 import { useLazyModule } from '../LazyPanel';
@@ -501,6 +501,11 @@ export function ExchangeView({
   const dispatchUi = useLazyModule(dispatches?.length ? loadDispatchUi : noUi);
   const ui = dispatchUi.kind === 'ready' ? dispatchUi.module : null;
   const steps = useMemo(() => [...stepsBefore, ...stepsAfter], [stepsBefore, stepsAfter]);
+  // By identity, not position: a reader that opened mid-turn prepends steps
+  // here as earlier pages land (see stepKeys).
+  const stepMemo = useRef(new Map<string, string>());
+  const keysBefore = useMemo(() => stepKeys(stepsBefore, stepMemo.current), [stepsBefore]);
+  const keysAfter = useMemo(() => stepKeys(stepsAfter, stepMemo.current), [stepsAfter]);
   // A turn whose match is buried in the work unfolds it, or the search would
   // report a hit with nothing on screen to look at.
   const hitInWork = useMemo(
@@ -628,7 +633,7 @@ export function ExchangeView({
       </div>
       )}
       {isOpen && stepsBefore.length > 0 && (
-        <div className="cx-steps">{stepsBefore.map((s, i) => renderStep(s, `b${i}`))}</div>
+        <div className="cx-steps">{stepsBefore.map((s, i) => renderStep(s, `b${keysBefore[i]}`))}</div>
       )}
 
       {/* The answer sits where it was said. Usually that is after all the work;
@@ -641,7 +646,7 @@ export function ExchangeView({
         </div>
       ) : null}
       {isOpen && stepsAfter.length > 0 && (
-        <div className="cx-steps">{stepsAfter.map((s, i) => renderStep(s, `a${i}`))}</div>
+        <div className="cx-steps">{stepsAfter.map((s, i) => renderStep(s, `a${keysAfter[i]}`))}</div>
       )}
       {/* Dispatches no tool call in this window can be tied to (the call itself
           scrolled out of the loaded window, say) still belong to the turn. */}

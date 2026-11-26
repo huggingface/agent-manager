@@ -28,6 +28,11 @@ const bundle = path.join(tmp, 'fixture.js');
 await build({
   stdin: { resolveDir: web, loader: 'tsx', contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
+    // The mounted reader's store, so a case can ask for new output at once
+    // instead of waiting out the poll's cadence.
+    import {ReaderStore} from './src/lib/readerStore';
+    const retain = ReaderStore.prototype.retain;
+    ReaderStore.prototype.retain = function(){ window.liveStore = this; return retain.call(this); };
     import ConversationView from './src/components/conversation/ConversationView';
     import {HISTORY_TARGET_EXCHANGES, HISTORY_MAX_EXCHANGES, FILL_MAX_REQUESTS} from './src/lib/traceWindows';
     window.HISTORY_TARGET_EXCHANGES = HISTORY_TARGET_EXCHANGES;
@@ -40,7 +45,7 @@ await build({
     const WINDOW_MIN_TURNS = 12, WINDOW_MAX_BYTES = 8*1024*1024;
     let cfg = {}, records = [], size = 0, root;
     function lay(options){
-      const {count, promptBytes, toolBytes, answerLines, lastAnswerLines} = options;
+      const {count, promptBytes, toolBytes, answerLines, lastAnswerLines, turn} = options;
       records = []; let at = 0;
       const put = (turn, bytes) => { records.push({at, size: bytes, turn}); at += bytes; };
       for (let i = 0; i < count; i++) {
@@ -52,6 +57,30 @@ await build({
         put({id:'a'+i, role:'assistant', ts:100002+i*10, kind:'final', blocks:[{type:'text',
           text:'Answer '+i+'.'+(lines>1 ? '\\n\\n'+Array.from({length:lines-1},(_,k)=>'body line '+k+' of answer '+i).join('\\n') : '')}]},
           Math.max(400, lines*60));
+      }
+      // One long agent turn after a last prompt, still running: many large
+      // tool records, more than the floor budget reaches.
+      if (turn) {
+        put({id:'last', role:'user', ts:200000, blocks:[{type:'text', text:'The last prompt'}]}, promptBytes);
+        for (let k = 0; k < turn.count; k++) {
+          const call = [
+            // 'say': a line of narration per step, so opened work is many rows
+            // rather than one grouped "Bash ×N".
+            // 'long': narration that only differs after a shared opening of
+            // more than 48 characters, at the same length every step.
+            ...(turn.say ? [{type:'text', text: turn.say === 'long'
+              ? 'Checking service state before scheduling the next background verification. Service '+String(k).padStart(3,'0')+'. '+'x'.repeat(200)
+              : 'Checking service '+k+' before the next log.'}] : []),
+            {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'}];
+          const result = {type:'tool_result', id:'hc'+k, text:'output of step '+k};
+          // 'split': the call and its result as two records, the way Claude
+          // writes them, so a window can start on a result whose call is
+          // still on the page before it.
+          if (turn.split) {
+            put({id:'h'+k, role:'assistant', ts:200001+k, blocks:call}, turn.bytes);
+            put({id:'r'+k, role:'user', ts:200001+k, blocks:[result]}, 10 * 1024);
+          } else put({id:'h'+k, role:'assistant', ts:200001+k, blocks:[...call, result]}, turn.bytes);
+        }
       }
       size = at;
     }
@@ -105,6 +134,13 @@ await build({
         flushSync(()=>root.render(<App/>));
       },
       set(options){ Object.assign(cfg, options); },
+      // Live output inside the running turn: a long answer, fetched at once.
+      appendLive(){
+        records.push({at:size, size:500, turn:{id:'live-answer', role:'assistant', ts:300000, blocks:[{type:'text',
+          text:Array.from({length:30}, (_, i) => 'Live answer paragraph '+i).join('\\n\\n')}]}});
+        size += 500;
+        return window.liveStore.loadNewer();
+      },
       // Append a genuinely new exchange, the way a live agent would.
       append(){
         const i = cfg.count;
@@ -179,6 +215,22 @@ await build({
         step();
       },
       stop(){ cancelAnimationFrame(window._raf); return window.samples || []; },
+      // The bottom edge of the newest row, every frame. Inside one huge turn
+      // there is no stable row text to follow: the whole turn is one exchange,
+      // and it gains its prompt (and its key) while history lands above it.
+      trackBottom(){
+        window.bottoms = []; window.atLatest = [];
+        const step = () => {
+          const rows = [...document.querySelectorAll('[data-x]')];
+          if (rows.length && window.probe.shown()) {
+            window.bottoms.push(Math.round(rows[rows.length-1].getBoundingClientRect().bottom * 100) / 100);
+            window.atLatest.push(window.probe.atBottom());
+          }
+          window._rb = requestAnimationFrame(step);
+        };
+        step();
+      },
+      stopBottom(){ cancelAnimationFrame(window._rb); return {bottoms: window.bottoms, atLatest: window.atLatest}; },
     };
   ` }, bundle: true, outfile: bundle, format: 'iife', platform: 'browser',
   define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent',
@@ -399,6 +451,164 @@ try {
   assert.ok(parentReads <= 12, `the whole cold open is a bounded number of requests (${parentReads})`);
   assert.ok(await p.locator('[data-x]').count() < 40, 'and the rendered window stays virtualized');
   results.push({ case: 'requests for a cold open', reads: parentReads });
+
+  // ---------- 10. one huge turn: the prompt that started it is loaded ----------
+  // 40 x 512 KiB of tool output after one prompt: past every budget the
+  // exchange targets have. The prompt must arrive, and the view must stay at
+  // the latest step while the big backward pages land above it.
+  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 40, bytes: 512 * 1024 }, beforeDelay: 60 }));
+  await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
+  await p.evaluate(() => window.probe.trackBottom());
+  // Settled: nothing loading, and no backward read for a second.
+  await p.waitForFunction(() => {
+    const n = window.reads.filter((r) => r.at === 'before').length;
+    const quiet = n > 0 && n === window.__n && !document.querySelector('.cxv-top-busy');
+    window.__n = n; return quiet;
+  }, null, { timeout: 60_000, polling: 1000 });
+  await p.evaluate(() => { delete window.__n; });
+  const huge = await p.evaluate(() => window.probe.stopBottom());
+  const hugeDrift = Math.max(...huge.bottoms) - Math.min(...huge.bottoms);
+  const top = await p.locator('.cxv-top').textContent();
+  assert.ok(huge.bottoms.length > 8, `the newest row was sampled across frames (${huge.bottoms.length})`);
+  assert.ok(await p.getByText('The last prompt', { exact: true }).count() > 0,
+    'the prompt that started the huge turn is in the reader');
+  assert.ok(!top.includes('not loaded'), `and the top row does not warn about it (${top})`);
+  assert.ok(hugeDrift <= 2, `the latest content stays put while the turn loads above it (max ${hugeDrift}px)`);
+  assert.ok(huge.atLatest.every(Boolean), 'and the reader stays at the latest content throughout');
+  results.push({ case: 'huge single turn', driftPx: hugeDrift, frames: huge.bottoms.length,
+    backwardReads: await p.evaluate(() => window.reads.filter((r) => r.at === 'before').length) });
+
+  // ---------- 11. past the hard cap the top row says the start is missing ----------
+  await p.evaluate(() => window.fixture.mount({ count: 2, turn: { count: 70, bytes: 768 * 1024 } }));
+  await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
+  await p.waitForFunction(() => /not loaded/.test(document.querySelector('.cxv-top')?.textContent || ''),
+    null, { timeout: 120_000, polling: 250 });
+  const capped = await p.locator('.cxv-top').textContent();
+  assert.equal(await p.locator('.cxv-top').getAttribute('disabled'), null, 'Load earlier stays usable');
+  assert.ok(await p.evaluate(() => window.probe.atBottom()), 'and the view is still at the latest step');
+  results.push({ case: 'huge turn past the cap', top: capped });
+
+  // ---------- 12. opened work survives the pages landing above it ----------
+  // Opened mid-turn, the leading exchange used to be keyed by its first loaded
+  // record, so every backward page inside the same turn (and the prompt
+  // arriving) made it a new row: the opened work collapsed and the place the
+  // operator was reading was lost. Slow pages, so the operator really does open
+  // the work and scroll up into it while the hunt is running. Three shapes:
+  //   plain  — each step one record;
+  //   split  — call and result as separate records, so pages land on the seam
+  //            where an earlier call absorbs an already-loaded result;
+  //   live   — between pages, live output grows the same row below the reader,
+  //            and the operator opens a step below what they are reading.
+  const readWhileHunting = async (label, turn, between) => {
+    // ~6 records a page, ~30 MiB: enough steps to scroll within after a few
+    // pages, and the prompt still reachable.
+    await p.evaluate((t) => window.fixture.mount({ count: 20, turn: t, beforeDelay: 500 }), turn);
+    await p.waitForFunction(() => window.probe.shown() && document.querySelector('.cx-fold')
+      && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
+    await p.locator('.cx-fold').last().click();
+    try {
+      await p.waitForFunction(() => document.querySelector('.cx-fold.on') && document.querySelector('.cx-steps')
+        && (() => { const el = document.querySelector('.cxv-body'); return el.scrollHeight - el.clientHeight > 400; })(),
+        null, { timeout: 10_000 });
+    } catch {
+      assert.fail(`${label}: opened work stays open while pages land: ${JSON.stringify(await p.evaluate(() => ({
+        open: !!document.querySelector('.cx-fold.on'), key: document.querySelector('[data-x]')?.dataset.x,
+        pages: window.reads.filter((x) => x.at === 'before').length })))}`);
+    }
+    // Read away from the bottom, the way a person does: a wheel, not scrollTop.
+    const box = await p.locator('.cxv-body').boundingBox();
+    await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await p.mouse.wheel(0, -300);
+    await p.waitForTimeout(300);
+    const opened = await p.evaluate(() => {
+      const el = document.querySelector('.cxv-body');
+      const r = el.getBoundingClientRect();
+      // The narration line nearest the middle of the reader: what is being
+      // read. Found again by its text: rows may legitimately reuse DOM nodes.
+      const lines = [...document.querySelectorAll('.cx-steps .cs-detail')].filter((e) => /^Checking service/.test(e.textContent));
+      const mid = r.top + r.height / 2;
+      const at = lines.sort((a, b) => Math.abs(a.getBoundingClientRect().top - mid) - Math.abs(b.getBoundingClientRect().top - mid))[0];
+      window.__text = at?.textContent || '';
+      window.__find = () => [...document.querySelectorAll('.cx-steps .cs-detail')].find((e) => e.textContent === window.__text);
+      return { key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+        before: window.reads.filter((x) => x.at === 'before').length,
+        text: window.__text.slice(0, 60),
+        top: window.__find()?.getBoundingClientRect().top,
+        atBottom: window.probe.atBottom() };
+    });
+    assert.ok(opened.key && opened.text, `${label}: the work is open and a line is being read`);
+    assert.equal(opened.atBottom, false, `${label}: and the operator has scrolled up into it`);
+    // Every frame, not only the end: the text must not jump and come back.
+    await p.evaluate(() => { window.__tops = []; const step = () => { const e = window.__find();
+      window.__tops.push(e ? Math.round(e.getBoundingClientRect().top * 100) / 100 : null); window.__rq = requestAnimationFrame(step); }; step(); });
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, opened.before, { timeout: 30_000 });
+    const extra = between ? await between() : {};
+    await p.waitForFunction(() => !document.querySelector('.cxv-top-busy'), null, { timeout: 90_000, polling: 250 });
+    const tops = await p.evaluate(() => { cancelAnimationFrame(window.__rq); return window.__tops; });
+    const later = await p.evaluate(() => ({
+      key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+      open: !!document.querySelector('.cx-fold.on'),
+      steps: document.querySelectorAll('.cx-steps').length,
+      prompt: [...document.querySelectorAll('[data-x]')].some((r) => r.textContent.includes('The last prompt')),
+      pages: window.reads.filter((x) => x.at === 'before').length,
+      openSteps: [...document.querySelectorAll('.cx-steps .cs.open .cs-detail')].map((e) => e.textContent),
+    }));
+    assert.ok(later.pages > opened.before + 2, `${label}: pages did land meanwhile (${opened.before} -> ${later.pages})`);
+    assert.ok(later.prompt, `${label}: the prompt arrived too`);
+    assert.ok(later.open && later.steps > 0, `${label}: the opened work is still open (${JSON.stringify(later)})`);
+    assert.equal(later.key, opened.key, `${label}: under the same row`);
+    assert.ok(tops.length > 8 && tops.every((v) => v !== null), `${label}: what was being read (${opened.text}) was on screen in every frame (${tops.length})`);
+    const readDrift = Math.max(...tops) - Math.min(...tops);
+    assert.ok(readDrift <= 2, `${label}: and did not move while the turn loaded above it (max ${readDrift}px over ${tops.length} frames)`);
+    results.push({ case: `open work during the hunt (${label})`, key: later.key, driftPx: readDrift, frames: tops.length,
+      pages: later.pages - opened.before });
+    return { ...later, ...extra };
+  };
+  await readWhileHunting('plain', { count: 190, bytes: 160 * 1024, say: true });
+  await readWhileHunting('split', { count: 190, bytes: 150 * 1024, say: true, split: true });
+  const growing = await readWhileHunting('live', { count: 190, bytes: 160 * 1024, say: true }, async () => {
+    // Live output grows the row below the reader…
+    await p.evaluate(() => window.fixture.appendLive());
+    await p.getByText('Live answer paragraph 29', { exact: false }).first().waitFor({ state: 'attached', timeout: 10_000 });
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2,
+      await p.evaluate(() => window.reads.filter((x) => x.at === 'before').length), { timeout: 30_000 });
+    // …and the operator opens a step below what they are reading.
+    const opened = await p.evaluate(() => {
+      const read = window.__find().getBoundingClientRect().top;
+      const r = document.querySelector('.cxv-body').getBoundingClientRect();
+      const head = [...document.querySelectorAll('.cx-steps .cs.tools .cs-head')]
+        .find((h) => { const t = h.getBoundingClientRect().top; return t > read + 40 && t < r.bottom - 20; });
+      if (!head) return null;
+      head.click();
+      return head.querySelector('.cs-detail')?.textContent || '';
+    });
+    assert.ok(opened, 'there was a step below the reading line to open');
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2,
+      await p.evaluate(() => window.reads.filter((x) => x.at === 'before').length), { timeout: 30_000 });
+    return { openedStep: opened };
+  });
+  assert.deepEqual(growing.openSteps, [growing.openedStep], `the step the operator opened is the one still open (${JSON.stringify(growing.openSteps)})`);
+
+  // 13. An opened NOTE stays the one open while earlier notes land above it,
+  // when every note opens with the same sentence and has the same length.
+  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 190, bytes: 160 * 1024, say: 'long' }, beforeDelay: 900 }));
+  await p.waitForFunction(() => document.querySelector('.cx-fold')
+    && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
+  await p.locator('.cx-fold').last().click();
+  await p.waitForSelector('.cx-steps .cs.note', { timeout: 10_000 });
+  const noteBefore = await p.evaluate(() => {
+    const row = [...document.querySelectorAll('.cx-steps .cs.note')].at(-2);
+    row.querySelector('.cs-head').click();
+    return window.reads.filter((x) => x.at === 'before').length;
+  });
+  await p.waitForSelector('.cx-steps .cs.note.open .cs-body');
+  const openedNote = (await p.locator('.cx-steps .cs.note.open .cs-body').textContent()).trim();
+  await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, noteBefore, { timeout: 30_000 });
+  await p.waitForTimeout(300);
+  const openNotes = await p.evaluate(() => [...document.querySelectorAll('.cx-steps .cs.note.open .cs-body')].map((e) => e.textContent.trim()));
+  assert.deepEqual(openNotes.map((t) => t.slice(0, 92)), [openedNote.slice(0, 92)],
+    'the note the operator opened is the one still open after earlier notes land');
+  results.push({ case: 'opened note during the hunt', open: openedNote.slice(84, 92) });
 
   assert.deepEqual(errors, [], 'no page errors');
 } finally {

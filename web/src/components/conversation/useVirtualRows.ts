@@ -18,8 +18,10 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
   const nodes = useRef(new Map<string, HTMLElement>());
   const heights = useRef(new Map<string, number>());
   const observer = useRef<ResizeObserver | null>(null);
-  const anchor = useRef<{ key: string; offset: number } | null>(null);
-  const target = useRef<{ key: string; offset: number } | null>(null);
+  /** `fromBottom`, when set, holds the row by its bottom edge instead (see
+   * `pinFirstRowBottom`); the next `update()` returns to the top. */
+  const anchor = useRef<{ key: string; offset: number; fromBottom?: number } | null>(null);
+  const target = useRef<{ key: string; offset: number; fromBottom?: number } | null>(null);
   const [measurement, measured] = useState(0);
   /**
    * The scroller height the reading position was last asserted against.
@@ -32,6 +34,9 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
    * any scroll event is delivered the position is already right.
    */
   const placedAt = useRef(-1);
+  /** The last bottom-edge pin applied: where it left the scroller, and how
+   * tall the row was then. */
+  const pinned = useRef<{ key: string; fromBottom: number; top: number; height: number } | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 700 });
   const offsets = useMemo(() => {
     const out = [0];
@@ -53,6 +58,13 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
   const mounted = () => {
     const list = container.current;
     return !!list && (!keysRef.current.length || list.getClientRects().length > 0);
+  };
+  /** A row's top and bottom in the scroller's content coordinates, from the DOM. */
+  const rowBox = (node: HTMLElement) => {
+    const el = scroller.current!;
+    const r = node.getBoundingClientRect();
+    const top = r.top - el.getBoundingClientRect().top + el.scrollTop;
+    return { top, bottom: top + r.height };
   };
   const origin = useCallback(() => {
     const el = scroller.current, list = container.current;
@@ -86,6 +98,13 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     if (following.current) { put(el.scrollHeight); return; }
     const wanted = target.current || anchor.current;
     if (!wanted) return;
+    const bottomOf = wanted.fromBottom !== undefined && nodes.current.get(wanted.key);
+    if (bottomOf) {
+      const box = rowBox(bottomOf);
+      put(box.bottom - wanted.fromBottom!);
+      pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom!, top: el.scrollTop, height: box.bottom - box.top };
+      return;
+    }
     const { keys: list, offsets: positions } = current.current;
     const index = list.indexOf(wanted.key);
     if (index >= 0) put(origin() + positions[index] + wanted.offset);
@@ -112,8 +131,41 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     const wanted = target.current || anchor.current;
     const node = wanted && nodes.current.get(wanted.key);
     if (!wanted || !node) return;
-    const rowTop = node.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
-    el.scrollTop = rowTop + wanted.offset;
+    const box = rowBox(node);
+    if (wanted.fromBottom === undefined) { el.scrollTop = box.top + wanted.offset; return; }
+    el.scrollTop = box.bottom - wanted.fromBottom;
+    pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom, top: el.scrollTop, height: box.bottom - box.top };
+  }, [following, scroller]);
+  /**
+   * The next content change grows the FIRST row at its top, so hold it by its
+   * bottom edge until the layout has settled.
+   *
+   * Called just before a backward page lands. A reader that opened in the
+   * middle of a long turn has that turn as its first row, and the page adds
+   * steps (and finally the prompt) inside it, above whatever the operator is
+   * reading. Anchored by its top, the text being read was pushed down by
+   * everything that arrived. Only for the first row, the only one a backward
+   * page can grow; other rows keep their top, which stays put when whole
+   * exchanges are prepended above them.
+   */
+  const pinFirstRowBottom = useCallback(() => {
+    const a = anchor.current;
+    const node = a && nodes.current.get(a.key);
+    const el = scroller.current;
+    if (following.current || !el || !a || !node || a.key !== keysRef.current[0]) return;
+    // The browser rounds every scroll offset it is given, so measuring this
+    // afresh on each page compounded that rounding: a pixel of drift per page.
+    // The exact distance from the last pin still holds only while nothing else
+    // moved: the scroller is where that pin put it (the operator has not
+    // scrolled) AND the row is as tall as it was (no live output appended to
+    // it, no step opened or closed in it). Reusing it after the row grew below
+    // the reading point scrolled by that growth too: a 935 px jump.
+    const last = pinned.current;
+    const box = rowBox(node);
+    const fromBottom = last && last.key === a.key && Math.abs(el.scrollTop - last.top) < 1.5
+      && Math.abs(box.bottom - box.top - last.height) < 0.5
+      ? last.fromBottom : box.bottom - el.scrollTop;
+    anchor.current = { ...a, fromBottom };
   }, [following, scroller]);
   useLayoutEffect(() => {
     const resize = new ResizeObserver((entries) => {
@@ -199,6 +251,6 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
   });
   const start = lower(offsets, Math.max(0, viewport.top - OVERSCAN));
   const end = Math.min(keys.length, lower(offsets, viewport.top + viewport.height + OVERSCAN) + 1);
-  return { container, measure, scrollTo, onScroll: update, cancelTarget, anchor, offsets, measuredHeight,
+  return { container, measure, scrollTo, onScroll: update, cancelTarget, pinFirstRowBottom, anchor, offsets, measuredHeight,
     start, end, before: offsets[start], after: offsets[keys.length] - offsets[end] };
 }

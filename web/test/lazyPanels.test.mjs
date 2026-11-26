@@ -155,7 +155,23 @@ try {
     // Sidebar frame states (#242/#244, 2026-11-10): 814,413 -> 816,076 (+1,663)
     // for the row marks, legend, unread wiring and the working -> done hold, all
     // drawn by the sidebar on first paint. Raised to 797.
-    assert.ok(entry.length <= 797 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 797 kB budget`);
+    // Reader: always load back to the last prompt (#236, 2026-11-03): main
+    // 812,680 here, this branch 814,327 (+1,647): +308 for the fill itself
+    // (holdsPrompt, FILL_PROMPT_*, the top row's warning) and +1,339 for the
+    // review's fixes (keepLeadKey, pinFirstRowBottom, size-based charging,
+    // the poll guard). All of it is the main reader's store, model and scroll
+    // anchoring, which the entry carries. 795 is 247 short; raised to 796,
+    // ~0.8 kB of headroom.
+    // The re-review's fixes (1a2b919) add 1,447 more: 815,774. Identity keys
+    // for steps (stepKeys) and the lead exchange (keepLeadKey on tool and
+    // message ids), the exhaustive block-size switch and the pin's geometry
+    // check; the same eager reader code. 670 over 796; raised to 797, 354 of
+    // headroom.
+    // #236 merged with main after the sidebar frame states (2026-11-22): main
+    // 816,076, merged 818,426 (+2,350), the reader fill and its review fixes
+    // above, all eager reader code. 2,298 over 797; raised to 800, 774 of
+    // headroom.
+    assert.ok(entry.length <= 800 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 800 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
