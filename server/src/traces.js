@@ -12,6 +12,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 // The trace panel reader (bottom of this file) locates its file with the same
 // resolver sharing uses. share.js does not import traces.js, so no cycle.
 import { findTrace, HARNESS_LABEL } from './share.js';
+import { piSessionsRoot, piTraceFiles } from './pi-traces.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
 import { codeModeUses, codeModeResults, patchFiles, stripDataUrls } from './codex-code-mode.js';
@@ -401,10 +402,10 @@ function parseOpenClaw(txt, pi = false) {
       const u = m.usage;
       if (u) {
         const cached = u.cacheRead || 0;
-        st.tokensIn += pi ? (u.input || 0) : Math.max(0, (u.input || 0) - cached);
+        st.tokensIn += pi ? (u.input || 0) + (u.cacheWrite || 0) : Math.max(0, (u.input || 0) - cached);
         st.cacheRead += cached;
         st.tokensOut += u.output || 0;
-        dg.sinceTokens += (u.input || 0) + (u.output || 0);
+        dg.sinceTokens += (u.input || 0) + (pi ? (u.cacheWrite || 0) : 0) + (u.output || 0);
       }
       if (Array.isArray(m.content)) {
         for (const cb of m.content) {
@@ -423,18 +424,8 @@ function parseOpenClaw(txt, pi = false) {
 
 // pi uses the same v3 records, but its input excludes cache reads.
 function parsePi(txt) { return parseOpenClaw(txt, true); }
-const piRoot = () => path.join(process.env.PI_CODING_AGENT_DIR || path.join(process.env.HOME || '', '.pi', 'agent'), 'sessions');
-function piFiles() { return memoList('pi', piFilesUncached); }
-async function piFilesUncached() {
-  const root = piRoot(); const out = [];
-  let dirs = []; try { dirs = await fsp.readdir(root, { withFileTypes: true }); } catch { return out; }
-  for (const d of dirs) {
-    if (!d.isDirectory()) continue;
-    let files = []; try { files = await fsp.readdir(path.join(root, d.name)); } catch { continue; }
-    for (const f of files) if (f.endsWith('.jsonl')) out.push(path.join(root, d.name, f));
-  }
-  return out;
-}
+const piRoot = piSessionsRoot;
+function piFiles() { return memoList('pi', piTraceFiles); }
 
 function openclawFiles() {
   return memoList('openclaw', openclawFilesUncached);
@@ -1583,10 +1574,16 @@ async function buildImpl() {
   }
 
   const byPiUuid = new Map(sessions.filter((s) => s.cli === 'pi' && s.sessionUuid).map((s) => [s.sessionUuid, s]));
-  for (const p of await piFiles()) {
+  const piPaths = await piFiles();
+  const piIdCounts = new Map();
+  for (const p of piPaths) {
+    const id = path.basename(p).match(UUID_RE)?.[1];
+    if (id) piIdCounts.set(id, (piIdCounts.get(id) || 0) + 1);
+  }
+  for (const p of piPaths) {
     seenFiles.add(p);
     const m = path.basename(p).match(UUID_RE);
-    attribute(m ? byPiUuid.get(m[1]) : null, await statsFor(p, parsePi));
+    attribute(m && piIdCounts.get(m[1]) === 1 ? byPiUuid.get(m[1]) : null, await statsFor(p, parsePi));
     await yieldLoop();
   }
 
@@ -1738,8 +1735,8 @@ export async function digestFor(s) {
     // and no transcript on this machine to find.
     if (isRemote(s.cli)) return remoteDigest(s);
     if (s.cli === 'pi' && s.sessionUuid) {
-      const p = (await piFiles()).find((p) => path.basename(p).endsWith(`_${s.sessionUuid}.jsonl`));
-      if (p) return (await statsFor(p, parsePi))?.digest || null;
+      const hit = await findTrace(s);
+      if (hit) return (await statsFor(hit.src, parsePi))?.digest || null;
     }
     if (s.cli === 'claude' && s.sessionUuid) {
       let best = null;
@@ -1777,8 +1774,8 @@ export async function digestFor(s) {
 export async function traceLocation(s) {
   try {
     if (s.cli === 'pi' && s.sessionUuid) {
-      const p = (await piFiles()).find((p) => path.basename(p).endsWith(`_${s.sessionUuid}.jsonl`));
-      return p ? { format: 'jsonl', path: p } : null;
+      const hit = await findTrace(s);
+      return hit ? { format: 'jsonl', path: hit.src } : null;
     }
     if (s.cli === 'claude' && s.sessionUuid) {
       for (const p of await claudeFiles()) {
@@ -2573,9 +2570,10 @@ async function normalizePi(file, out, range) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
     const msg = { role: m.role, ts: j.timestamp ? Date.parse(j.timestamp) || undefined : undefined, blocks: [] };
     if (m.model) { msg.model = m.model; out.model = m.model; }
-    if (m.usage) msg.usage = { in: m.usage.input || 0, out: m.usage.output || 0, cacheRead: m.usage.cacheRead || 0 };
+    if (m.usage) msg.usage = { in: (m.usage.input || 0) + (m.usage.cacheWrite || 0), out: m.usage.output || 0, cacheRead: m.usage.cacheRead || 0 };
     for (const c of Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }]) {
       if (c.type === 'toolCall') { const use = { type: 'tool_use', id: c.id, name: c.name || 'tool', ...capText(c.arguments) }; msg.blocks.push(use); stitch.register(use, msg); }
+      else if (c.type === 'image' && c.data) msg.blocks.push({ type: 'image', src: dataUrl(c.data, c.mimeType), mediaType: c.mimeType });
       else if (c.type === 'thinking' && c.thinking) msg.blocks.push(textBlock('thinking', c.thinking));
       else if (c.type === 'text' && c.text) msg.blocks.push(textBlock('text', c.text));
     }
@@ -2977,7 +2975,7 @@ function pageOf(parsed, offset, limit) {
 // it; `after: <end>` picks up whatever the agent has written since. Windows abut
 // exactly, so a reader can stitch them into one conversation with no gaps and no
 // repeats — and never pays for the part of the trace nobody scrolled to.
-const WINDOWABLE = new Set(['claude', 'codex', 'openclaw', 'sts']);
+const WINDOWABLE = new Set(['claude', 'codex', 'pi', 'openclaw', 'sts']);
 const WINDOW_BYTES = 384 * 1024;         // default span (see the PR for the measurements)
 const WINDOW_MIN_BYTES = 32 * 1024;
 const WINDOW_MAX_BYTES = 8 * 1024 * 1024; // a single window can't cost more than this
@@ -3323,8 +3321,7 @@ async function serveTrace({ key, harness, file, sessionId, size, stat, decorate,
  * ambiguity refusal and codex subagent rollouts. Do not reimplement it.
  */
 export async function readTrace(session, opts = {}) {
-  const loc = session.cli === 'pi' ? await traceLocation(session) : null;
-  const hit = loc ? { src: loc.path } : await findTrace(session, store.list());
+  const hit = await findTrace(session, store.list());
   if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
 
   const st = await statRetry(hit.src);

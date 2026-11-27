@@ -244,7 +244,12 @@ test('fx: never takes a flag', () => {
 test('pi pins fresh and resumed panes and preserves explicit choices', () => {
   const seeded = make('pi', { model: 'huggingface/moonshotai/Kimi-K3.1-Pro', effort: 'high', pendingPrompt: 'hello', pendingImagePaths: ['/tmp/a b.png'] });
   const expected = ['pi', '--tui-mode', 'regular', '--approve', '--session-id', seeded.sessionUuid, '--model', seeded.model, '--thinking', 'high'];
-  assert.deepEqual(launch(runner.commandFor(seeded)).calls, [[...expected, '@/tmp/a b.png', 'hello']]);
+  assert.deepEqual(launch(runner.commandFor(seeded)).calls, [[...expected, '--', '@/tmp/a b.png', 'hello']]);
+  for (const prompt of ['--help', '- Review the README']) {
+    assert.deepEqual(launch(runner.commandFor({ ...seeded, pendingPrompt: prompt })).calls, [[...expected, '--', '@/tmp/a b.png', prompt]]);
+  }
+  assert.deepEqual(launch(runner.commandFor({ ...seeded, pendingPrompt: '' })).calls, [[...expected, '--', '@/tmp/a b.png']]);
+  assert.deepEqual(launch(runner.commandFor({ ...seeded, pendingPrompt: '', pendingImagePaths: [] })).calls, [expected]);
   assert.deepEqual(launch(runner.commandFor({ ...seeded, everStarted: true })).calls, [expected]);
   assert.throws(() => runner.commandFor({ ...seeded, sessionUuid: 'bad;command' }));
 });

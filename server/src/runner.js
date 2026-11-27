@@ -2015,7 +2015,7 @@ export function commandFor(session) {
   if (cli.id === 'pi') {
     if (!UUID.test(session.sessionUuid || '')) throw new Error('pi session requires a valid session UUID');
     const seed = !session.everStarted ? [...q0Images.map((i) => `@${i}`), q0].filter(Boolean).join(' ') : '';
-    return `exec ${[cli.resume(session.sessionUuid, f), seed].filter(Boolean).join(' ')}`;
+    return `exec ${cli.resume(session.sessionUuid, f)}${seed ? ` -- ${seed}` : ''}`;
   }
 
   // OpenClaw: first run needs its onboarding wizard (keys, workspace); once the

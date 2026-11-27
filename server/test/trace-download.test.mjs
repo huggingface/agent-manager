@@ -16,11 +16,22 @@ const ROOT = path.dirname(HERE);
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'am-trace-download-'));
 const DATA_DIR = path.join(TMP, 'data');
 const HOME = path.join(TMP, 'home');
+const PI_DIR = path.join(TMP, 'pi');
+const PI_UUID = 'aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb';
+const PI_FILE = path.join(PI_DIR, 'sessions', '--pi--', `2026-01-01_${PI_UUID}.jsonl`);
+const PI_BODY = [
+  { type: 'session', version: 3, id: PI_UUID, cwd: '/pi' },
+  { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'pi-search-needle' }] } },
+  { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } },
+].map(JSON.stringify).join('\n') + '\n';
 const PORT = process.env.TRACE_DOWNLOAD_PORT || String(await freePort());
 const API = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(path.join(HOME, '.claude', 'projects', 'am'), { recursive: true });
+fs.mkdirSync(path.dirname(PI_FILE), { recursive: true });
+fs.writeFileSync(PI_FILE, PI_BODY);
+fs.writeFileSync(path.join(DATA_DIR, 'sessions.json'), JSON.stringify([{ id: 'pi-pane', name: 'Pi pane', cli: 'pi', path: 'pi', sessionUuid: PI_UUID }]));
 
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -40,6 +51,7 @@ const start = async () => {
     cwd: ROOT,
     env: {
       ...BASE_ENV,
+      PI_CODING_AGENT_DIR: PI_DIR,
       PORT, DATA_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
       AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
     },
@@ -67,6 +79,19 @@ const post = (url, body) => fetch(`${API}${url}`, {
 
 try {
   await start();
+
+  const piDownload = await fetch(`${API}/api/trace/pi-pane/download`);
+  check('pi session downloads its pinned transcript', piDownload.status === 200 && await piDownload.text() === PI_BODY);
+  const piSearch = await fetch(`${API}/api/trace/pi-pane/search?q=pi-search-needle`);
+  const piHits = await piSearch.json();
+  check('pi session search finds its pinned transcript', piSearch.status === 200 && piHits.hits?.length === 1);
+  const piPane = await (await post('/api/sessions', { cli: 'trace', name: 'Pi Reader', path: '.' })).json();
+  await fetch(`${API}/api/trace/${piPane.id}/source`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'session', ref: 'pi-pane' }) });
+  const piLocation = await fetch(`${API}/api/trace/${piPane.id}/location`);
+  const location = await piLocation.json();
+  check('trace pane resolves the pi location', piLocation.status === 200 && location.path === PI_FILE);
+  const piRead = await fetch(`${API}/api/trace/${piPane.id}?tail=1`);
+  check('trace pane reads the pi conversation', piRead.status === 200 && (await piRead.text()).includes('pi-search-needle'));
 
   const made = await (await post('/api/sessions', { cli: 'claude', name: 'Download me', path: 'dl' })).json();
 

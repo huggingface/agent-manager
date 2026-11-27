@@ -24,6 +24,7 @@
 
 import fs from 'node:fs';
 import { ApiError } from './api-errors.js';
+import { findPiTrace } from './pi-traces.js';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -433,6 +434,7 @@ export async function findTrace(session, allSessions = []) {
   switch (session.cli) {
     case 'claude': { const p = await findTranscript(session, allSessions); return p && { src: p }; }
     case 'codex': { const p = await findRollout(session, allSessions); return p && { src: p }; }
+    case 'pi': { const p = await findPiTrace(session.sessionUuid); return p && { src: p }; }
     case 'openclaw': { const p = await findOpenClaw(session, allSessions); return p && { src: p }; }
     case 'fx': { const p = await findFxEvents(session, allSessions); return p && { src: p }; }
     case 'antigravity': {
