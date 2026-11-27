@@ -12,8 +12,8 @@ export PATH="$prefix/bin:$PATH"
 selected="${*:-claude codex gemini opencode pi openclaw}"
 
 # Required versus optional, matching the Dockerfile exactly: it installs Claude
-# and Codex unconditionally and lets Gemini, opencode and OpenClaw fail with a
-# note (`|| echo "... install failed"`). Those three routinely refuse to install
+# and Codex unconditionally and lets Gemini, opencode, pi and OpenClaw fail with a
+# note (`|| echo "... install failed"`). Some may refuse to install
 # on a Node version the others accept, so making them fatal here meant the
 # recommended no-argument run could not finish on a supported runtime — and the
 # manager already reports a missing CLI as unavailable rather than breaking.
