@@ -130,10 +130,12 @@ for (const s of store.list()) {
 
 // Empty dirs don't reliably persist on the bucket (object storage) across
 // restarts, so re-create every recorded workspace path on the mount so the
-// Files agent always sees them.
+// Files agent always sees them. Archived sessions are skipped: their folders
+// may have been moved away or removed on purpose, and recreating them would
+// leave empty placeholders behind in the workspace.
 function ensureWorkspaceFolders() {
   for (const s of store.list()) {
-    if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
+    if (s.path && !s.archivedAt) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   }
   for (const g of groups.list()) {
     if (g.path) { try { fs.mkdirSync(workspacePath(g.path), { recursive: true }); } catch {} }
