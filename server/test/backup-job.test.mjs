@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { JOB_SCRIPT, DEFAULT_EXCLUDE, parseBackupLogs } from '../src/backup.js';
 
-function runJob(fail = false) {
+function runJob(fail = false, source = 'ns/source') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-job-'));
   const work = path.join(dir, 'work');
   const fakeToken = 'hf_' + 'A'.repeat(34);
@@ -33,7 +33,7 @@ class HfApi:
    raise ValueError('Offending files: data/dump.bin (token: ' + ${JSON.stringify(fakeToken)} + ')')
 `);
   const script = JOB_SCRIPT.split("python - <<'EOPY'\n")[1].split('\nEOPY')[0].replace('WORK = "/work"', `WORK = ${JSON.stringify(work)}`);
-  const result = spawnSync('python3', ['-c', script], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: dir, AM_SOURCE: 'ns/source', AM_DATASET: 'ns/dataset', AM_STAGING: 'ns/staging', AM_EXCLUDE: '.config/google-chrome-for-testing' } });
+  const result = spawnSync('python3', ['-c', script], { encoding: 'utf8', env: { ...process.env, PYTHONPATH: dir, AM_SOURCE: source, AM_DATASET: 'ns/dataset', AM_STAGING: 'ns/staging', AM_EXCLUDE: '.config/google-chrome-for-testing' } });
   fs.rmSync(dir, { recursive: true, force: true });
   return { ...result, fakeToken };
 }
@@ -49,6 +49,13 @@ test('the Job starts with empty staging, excludes Git and Chrome and scrubs bina
   assert.match(r.stdout, new RegExp('BINARY 00' + '58'.repeat(r.fakeToken.length) + 'ff'));
   assert.doesNotMatch(r.stdout, /retry/);
   assert.equal(parseBackupLogs(r.stdout).gitFoldersSkipped, 2);
+});
+
+test('the source bucket cannot be deleted when configured as staging', () => {
+  const r = runJob(false, 'ns/staging');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /staging bucket is the source bucket/);
+  assert.doesNotMatch(r.stdout, /DELETE|CREATE/);
 });
 
 test('the Job and recorded reason never echo a token from a Hub rejection', () => {
