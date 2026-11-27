@@ -206,14 +206,10 @@ workspace folders: 11 `node_modules`, 6 `.venv`, 4 `.cache`, plus a `$HOME/.cach
 holding `ms-playwright`, `google-chrome-for-testing-headless`, `huggingface`, `uv`
 and the `claude-cli-nodejs` transcripts of §3.10.
 
-Two things that survey found are deliberately **not** in the default:
-
-- **`.git` — 11 of them, the most common folder in the bucket.** Rank candidates
-  by size or count and it comes out on top; it is also the one thing you would
-  most want back. Never default it.
-- **`dist`, `build`, `target`** — regenerable in most repos, a hand-written source
-  folder in enough of them. A default that silently drops work is worse than one
-  that copies some junk, so these are opt-in.
+Git metadata (`.git` directories) is always excluded: the Hub cannot store it.
+Push local-only work or make a `git bundle` to preserve it. The Job reports the
+number of skipped directories. `dist`, `build`, and `target` remain opt-in
+because they can contain handwritten work.
 
 An absent key and an empty list mean different things: `undefined` is "never
 asked" and takes the default, `[]` is a list the operator emptied on purpose and
@@ -512,7 +508,7 @@ Two mechanisms, because either alone is insufficient:
 - **Skip** files that exist to hold credentials, matched on the exact final path
   segment. A substring test for `/credentials` sails straight past
   `/.credentials.json` — that gap put a credentials file into a probe commit.
-- **Scrub** stray occurrences in text files, then **verify**, then commit. The
+- **Scrub** stray occurrences in all files with same-length filler, then **verify**, then commit. The
   verify is mandatory: if anything still matches, the run ends with no commit.
 
 Patterns are boundary-anchored. A looser `sk-[A-Za-z0-9_-]{24,}` matched

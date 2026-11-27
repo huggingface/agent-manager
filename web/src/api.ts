@@ -388,6 +388,7 @@ export interface BackupStatus {
   failures: number;
   lastFailure: { at: number; jobId: string; stage: string; message: string | null; reason: string | null } | null;
   lastSuccessAt: number | null;
+  gitFoldersSkipped: number | null;
   nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;

@@ -775,7 +775,8 @@ export default function SettingsView({
                       Snapshots your work — workspaces, transcripts, config — to a private dataset on
                       the Hub every hour, so you can get back any past version. Caches and dependency
                       folders are skipped, and saved logins are left out: a snapshot is never a place
-                      to keep credentials. Nothing is ever written to or deleted from your bucket.
+                      to keep credentials. Git metadata is excluded; push or use git bundle for local-only work.
+                      Nothing is ever written to or deleted from your bucket.
                     </div>
                     {/* A kv table, not a run-on sentence: the destinations and a
                         timestamp are things you scan, not read. The two repos
@@ -810,6 +811,9 @@ export default function SettingsView({
                           <span>Last updated</span>
                           <b>{bk.lastSuccessAt ? new Date(bk.lastSuccessAt).toLocaleString() : 'never'}</b>
                         </div>
+                        {bk.gitFoldersSkipped != null && (
+                          <div><span>Git folders skipped</span><b>{bk.gitFoldersSkipped}</b></div>
+                        )}
                         {/* The dashboard strip says a backup is failing; this says
                             what the Job actually reported, which is what tells you
                             whether it is yours to fix. The message and the Job's own

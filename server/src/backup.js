@@ -93,9 +93,6 @@ export const MAX_EXCLUDES = 40;
  * `.elan/toolchains` (13,904, 2.75 GB) and `.npm/_cacache` (1.03 GB).
  *
  * Deliberately NOT here:
- *   - `.git` — appears more often than anything else and holds the work you
- *     would most want back: unpushed commits and staged changes live nowhere
- *     else. Cheap to keep, and a partially-copied `.git` is a corrupt repo.
  *   - git worktrees as a class. A clone looks reproducible from its remote, but
  *     uncommitted work in it is not.
  *   - `dist` / `build` / `target` — genuinely ambiguous names for a source
@@ -111,6 +108,8 @@ export const DEFAULT_EXCLUDE = Object.freeze([
   '.gradle/caches', '.m2/repository', '.deno', '.bun/install/cache', '.turbo', '.next',
   // toolchains an installer re-fetches
   '.elan/toolchains', '.rustup/toolchains', '.nvm/versions', '.pyenv/versions',
+  // Chrome crash dumps can contain process credentials
+  '.config/google-chrome-for-testing',
   // scratch
   '.tmp', '.elan/tmp', '.lake/build',
 ]);
@@ -197,9 +196,10 @@ export const JOB_SCRIPT = `set -euo pipefail
 pip install -q "huggingface_hub[hf_xet]"
 
 python - <<'EOPY'
-import os, re, sys, time, collections
+import os, re, sys, time, collections, logging
 from huggingface_hub import HfApi
 
+logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
 api = HfApi()
 SRC = os.environ["AM_SOURCE"]
 DATASET = os.environ["AM_DATASET"]
@@ -226,9 +226,12 @@ def must_be_private(kind, rid):
     if getattr(info, "private", None) is not True:
         sys.exit("refusing to back up: " + kind + " " + rid + " is not private")
 
+if STAGING == SRC:
+    sys.exit("refusing to back up: staging bucket is the source bucket")
 must_be_private("bucket", SRC)
 api.create_repo(DATASET, repo_type="dataset", private=True, exist_ok=True)
 must_be_private("dataset", DATASET)
+api.delete_bucket(STAGING, missing_ok=True)
 api.create_bucket(STAGING, private=True, exist_ok=True)
 must_be_private("bucket", STAGING)
 say("destinations verified private: " + DATASET + ", " + STAGING)
@@ -239,8 +242,8 @@ def cleanup():
     try:
         api.delete_bucket(STAGING)
         say("staging bucket deleted: " + STAGING)
-    except Exception as e:
-        say("WARNING could not delete staging bucket " + STAGING + ": " + str(e))
+    except Exception:
+        say("WARNING could not delete staging bucket " + STAGING)
 
 try:
     # ------------------------------------------------------------------ 1. list
@@ -273,9 +276,13 @@ try:
         return path.rsplit("/", 1)[-1] in CRED_NAMES
 
     keep = []
+    git_dirs = set()
     n_excl = n_cred = n_nohash = 0
     for f in entries:
-        if excluded(f.path):
+        parts = f.path.split("/")
+        if ".git" in parts[:-1]:
+            git_dirs.add("/".join(parts[:parts.index(".git") + 1]))
+        elif excluded(f.path):
             n_excl += 1
         elif is_credential(f.path):
             n_cred += 1
@@ -287,6 +294,7 @@ try:
     say("scope: keeping " + str(len(keep)) + " files (" + format(kb / 1e9, ".2f") + " GB); skipped "
         + str(n_excl) + " reproducible, " + str(n_cred) + " credential-bearing, "
         + str(n_nohash) + " without a hash")
+    say("scope: skipped " + str(len(git_dirs)) + " .git folders; push or use git bundle for local-only work")
     if not keep:
         sys.exit("refusing to commit: the scope matched no files")
 
@@ -326,27 +334,20 @@ try:
         ("aws", re.compile((BEF + "AKIA[0-9A-Z]{16}" + AFT).encode())),
         ("google", re.compile((BEF + "AIza[0-9A-Za-z_-]{35}" + AFT).encode())),
     ]
-    NUL = bytes([0])
-
-    def textfiles():
+    def allfiles():
         for root, _, fs in os.walk(WORK):
             for fn in fs:
                 fp = os.path.join(root, fn)
-                try:
-                    data = open(fp, "rb").read()
-                except OSError:
-                    continue
-                if NUL in data[:8192]:
-                    continue
-                yield fp, data
+                with open(fp, "rb") as source:
+                    yield fp, source.read()
 
     hits = collections.Counter()
     touched = 0
     t = time.time()
-    for fp, data in textfiles():
+    for fp, data in allfiles():
         orig = data
         for name, rx in SECRETS:
-            data, k = rx.subn(b"[REDACTED-SECRET]", data)
+            data, k = rx.subn(lambda m: b"X" * len(m.group()), data)
             if k:
                 hits[name] += k
         if data != orig:
@@ -359,21 +360,28 @@ try:
     # Mandatory, not a nicety. The Hub's scanner is TruffleHog and it verifies a
     # find by authenticating with it, which INVALIDATES a live token. A commit
     # that leaks one does not merely fail: it breaks the operator's credentials.
-    left = [os.path.relpath(fp, WORK) for fp, d in textfiles()
-            if any(rx.search(d) for _, rx in SECRETS)]
+    left = sum(1 for _, d in allfiles() if any(rx.search(d) for _, rx in SECRETS))
     if left:
-        sys.exit("refusing to commit: secrets still present in " + ", ".join(left[:5])
-                 + ((" (+" + str(len(left) - 5) + " more)") if len(left) > 5 else ""))
+        sys.exit("refusing to commit: secrets still present in " + str(left) + " files")
     say("verified: no secret patterns remain")
 
     # --------------------------------------------------------------- 7. commit
     # delete_patterns makes the newest commit match the scope, while every
     # earlier commit keeps since-removed files recoverable.
     t = time.time()
-    api.upload_folder(
-        folder_path=WORK, repo_id=DATASET, repo_type="dataset", delete_patterns="*",
-        commit_message="Bucket snapshot " + time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
-    )
+    try:
+        api.upload_folder(
+            folder_path=WORK, repo_id=DATASET, repo_type="dataset", delete_patterns="*",
+            commit_message="Bucket snapshot " + time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
+        )
+    except Exception as e:
+        # Only paths already in the snapshot can be reported. Never echo the
+        # exception: Hub secret-scan errors include the actual token values.
+        message = str(e)
+        paths = [f.path for f in keep if f.path in message
+                 and re.fullmatch(r"[A-Za-z0-9_./ -]+", f.path)
+                 and not any(rx.search(f.path.encode()) for _, rx in SECRETS)]
+        sys.exit("refusing to commit: " + (", ".join(paths[:5]) if paths else "Hub rejected upload; see job status"))
     say("committed to " + DATASET + " in " + format(time.time() - t, ".0f") + "s")
 finally:
     cleanup()
@@ -467,6 +475,7 @@ export async function runBackupNow(cfg) {
   for (const [label, id] of [['source', source], ['dataset', dataset], ['staging', staging]]) {
     if (!validRepoId(id)) throw new ApiError(400, 'invalid-input', `${label} is not a valid repo id`);
   }
+  if (staging === source) throw new ApiError(400, 'invalid-input', 'staging bucket must differ from source');
   // Nothing is pre-created here. Both destinations are created explicitly
   // private INSIDE the Job and then read back before anything is written —
   // creating them from two places is how you end up trusting a default.
@@ -496,21 +505,22 @@ async function jobStage(jobId) {
 }
 
 /**
- * Why a run failed, in one line, from its own logs.
- *
- * The platform message says "Job timeout"; the logs say the bucket has a
- * `.cache/` path the Hub will not commit. The second is the one that tells an
- * operator what to do, so both are kept and this is the one shown first.
+ * Read the Job's controlled refusal and Git-folder count from its logs.
+ * Arbitrary error lines may contain secrets and must not enter state.
  */
-async function failureReason(jobId) {
-  try {
-    const out = await run(['jobs', 'logs', jobId], { timeout: 90_000 });
-    const lines = out.split('\n').map((l) => l.trim())
-      .filter((l) => l && !/^(WARNING|Hint:|\[notice\])/.test(l));
-    const telling = [...lines].reverse()
-      .find((l) => /error|refus|denied|invalid|cannot|failed|timeout/i.test(l));
-    return (telling || lines[lines.length - 1] || '').slice(0, 300) || null;
-  } catch { return null; }
+export function parseBackupLogs(out) {
+  const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
+  const countLine = [...lines].reverse().find((l) => /^scope: skipped \d+ \.git folders;/.test(l));
+  const gitFoldersSkipped = countLine ? Number(countLine.match(/^scope: skipped (\d+)/)[1]) : null;
+  // Only the Job's controlled refusal is safe to persist. Other exceptions can
+  // contain arbitrary Hub response bodies, including token values.
+  const refusal = [...lines].reverse().find((l) => l.startsWith('refusing to commit:'));
+  return { gitFoldersSkipped, reason: refusal ? refusal.slice(0, 300) : null };
+}
+
+async function backupLogDetails(jobId) {
+  try { return parseBackupLogs(await run(['jobs', 'logs', jobId], { timeout: 90_000 })); }
+  catch { return { gitFoldersSkipped: null, reason: null }; }
 }
 
 /**
@@ -527,14 +537,16 @@ async function recordOutcome() {
   if (!st.jobId || st.outcomeFor === st.jobId) return;
   const { stage, message } = await jobStatus(st.jobId);
   if (!stage || isActiveStage(stage)) return; // still running, or the Hub did not say
+  const details = await backupLogDetails(st.jobId);
   if (stage === 'COMPLETED') {
-    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now() });
+    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now(), gitFoldersSkipped: details.gitFoldersSkipped });
     return;
   }
   saveState({
     outcomeFor: st.jobId,
     failures: (st.failures || 0) + 1,
-    lastFailure: { at: Date.now(), jobId: st.jobId, stage, message: message || null, reason: await failureReason(st.jobId) },
+    gitFoldersSkipped: details.gitFoldersSkipped,
+    lastFailure: { at: Date.now(), jobId: st.jobId, stage, message: message || null, reason: details.reason },
   });
   console.warn(`[backup] run ${st.jobId} ended ${stage}${message ? ` (${message})` : ''}`);
 }
@@ -687,6 +699,7 @@ export async function backupStatus(cfg) {
     failures: state.failures || 0,
     lastFailure: state.lastFailure || null,
     lastSuccessAt: state.lastSuccessAt || null,
+    gitFoldersSkipped: state.gitFoldersSkipped ?? null,
     nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
     datasetPrivate: priv, // null = unknown or not created yet
     error: state.error || null,
