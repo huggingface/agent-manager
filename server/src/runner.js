@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import pty from 'node-pty';
-import { dismissCodexUpdatePrompt, trustCodexWorkspace } from './first-run.js';
+import { dismissCodexUpdatePrompt, trustAgyWorkspace, trustCodexWorkspace } from './first-run.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
@@ -2181,6 +2181,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     trustCodexWorkspace(realWork);
     dismissCodexUpdatePrompt(cliVersion('codex'));
   }
+  // Antigravity keeps the same kind of exact-path list, but in JSON, so it is
+  // a checked rewrite that writes nothing once the folder is listed and backs
+  // off if agy touched the file meanwhile. See trustAgyWorkspace.
+  if (session.cli === 'antigravity') trustAgyWorkspace(realWork);
   if (session.cli === 'claude' && session.everStarted && session.sessionUuid) {
     recoverClaudeTranscript(session, realWork);
   }

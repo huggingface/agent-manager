@@ -14,6 +14,8 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'first-run-'));
 process.env.DATA_DIR = path.join(root, 'data');
 process.env.CLAUDE_CONFIG_DIR = path.join(root, 'claude');
 process.env.CODEX_HOME = path.join(root, 'codex');
+// agy has no config-dir override: its settings live under HOME, so HOME is a temp dir too.
+process.env.HOME = path.join(root, 'home');
 for (const d of [process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME]) fs.mkdirSync(d, { recursive: true });
 
 const fr = await import('../src/first-run.js');
@@ -193,6 +195,97 @@ test('an existing settings.json with skipDangerousModePermissionPrompt still get
   const before = fs.readFileSync(settings, 'utf8');
   assert.equal(fr.ensureClaudeDialogDefaults(), false, 'explicit cleanupPeriodDays is respected');
   assert.equal(fs.readFileSync(settings, 'utf8'), before);
+});
+
+// ---- Antigravity: a JSON list, so a checked rewrite that never clobbers agy ----
+
+const agyWrite = (v) => {
+  fs.mkdirSync(path.dirname(fr.agySettingsFile()), { recursive: true });
+  fs.writeFileSync(fr.agySettingsFile(), typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+};
+const agyRead = () => fs.readFileSync(fr.agySettingsFile(), 'utf8');
+
+test('agy: the settings file is under HOME, where the code already looks', () => {
+  assert.equal(fr.agySettingsFile(), path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'settings.json'));
+});
+
+test('agy: a new folder is added once, and a second call writes nothing', () => {
+  agyWrite({ trustedWorkspaces: ['/old'] });
+  assert.equal(fr.trustAgyWorkspace('/work/new'), true);
+  assert.deepEqual(JSON.parse(agyRead()).trustedWorkspaces, ['/old', '/work/new']);
+  const after = agyRead();
+  const mtime = fs.statSync(fr.agySettingsFile()).mtimeMs;
+  assert.equal(fr.trustAgyWorkspace('/work/new'), false, 'already listed');
+  assert.equal(agyRead(), after, 'not one byte changed');
+  assert.equal(fs.statSync(fr.agySettingsFile()).mtimeMs, mtime, 'not even rewritten');
+});
+
+test('agy: every other key keeps its value, its order and agy\'s layout', () => {
+  const cfg = {
+    model: 'Gemini 4 Carbon (High)',
+    trustedWorkspaces: ['/a', '/b'],
+    toolPermission: { shell: 'ask', nested: [1, { x: null }] },
+    flag: false,
+    unicode: 'é ✓',
+  };
+  const original = JSON.stringify(cfg, null, 2); // agy's own: 2 spaces, no trailing newline
+  agyWrite(original);
+  assert.equal(fr.trustAgyWorkspace('/work/c'), true);
+  const text = agyRead();
+  assert.equal(text, JSON.stringify({ ...cfg, trustedWorkspaces: ['/a', '/b', '/work/c'] }, null, 2));
+  assert.deepEqual(Object.keys(JSON.parse(text)), Object.keys(cfg), 'key order kept');
+  assert.equal(fs.readdirSync(path.dirname(fr.agySettingsFile())).length, 1, 'no temp file left behind');
+});
+
+test('agy: no trustedWorkspaces key yet means one is added, nothing else', () => {
+  agyWrite({ model: 'm' });
+  assert.equal(fr.trustAgyWorkspace('/work/d'), true);
+  assert.deepEqual(JSON.parse(agyRead()), { model: 'm', trustedWorkspaces: ['/work/d'] });
+});
+
+test('agy: a file we do not understand is left alone', () => {
+  for (const bad of ['{ not json', '["an","array"]', 'null', '{"trustedWorkspaces":"/a"}', '{"trustedWorkspaces":{"/a":true}}']) {
+    agyWrite(bad);
+    assert.equal(fr.trustAgyWorkspace('/work/e'), false, bad);
+    assert.equal(agyRead(), bad, `untouched: ${bad}`);
+  }
+});
+
+test('agy: a missing file is created with just the one entry', () => {
+  fs.rmSync(path.dirname(fr.agySettingsFile()), { recursive: true, force: true });
+  assert.equal(fr.trustAgyWorkspace('/work/f'), true);
+  assert.deepEqual(JSON.parse(agyRead()), { trustedWorkspaces: ['/work/f'] });
+});
+
+test('agy: only absolute paths are written', () => {
+  agyWrite({ trustedWorkspaces: [] });
+  assert.equal(fr.trustAgyWorkspace('relative'), false);
+  assert.equal(fr.trustAgyWorkspace(''), false);
+  assert.deepEqual(JSON.parse(agyRead()).trustedWorkspaces, []);
+});
+
+test('agy: a change between our read and our rename aborts, and agy\'s write stands', () => {
+  // Deterministic: agy "writes" at the worst moment, right after our temp file
+  // is complete and before we would rename it over the live file.
+  agyWrite({ model: 'old', trustedWorkspaces: ['/a'] });
+  const theirs = JSON.stringify({ model: 'agy-just-wrote-this', trustedWorkspaces: ['/a'] }, null, 2);
+  const real = fs.writeFileSync;
+  let fired = false;
+  fs.writeFileSync = function (file, ...rest) {
+    const r = real.call(this, file, ...rest);
+    if (!fired && String(file).includes('.settings.json.am-')) { fired = true; real(fr.agySettingsFile(), theirs); }
+    return r;
+  };
+  try {
+    assert.equal(fr.trustAgyWorkspace('/work/raced'), false);
+  } finally {
+    fs.writeFileSync = real;
+  }
+  assert.ok(fired, 'the race was exercised');
+  assert.equal(agyRead(), theirs, 'agy\'s concurrent write is not lost');
+  assert.equal(fs.readdirSync(path.dirname(fr.agySettingsFile())).length, 1, 'our temp file is cleaned up');
+  assert.equal(fr.trustAgyWorkspace('/work/raced'), true, 'and the next launch adds it');
+  assert.equal(JSON.parse(agyRead()).model, 'agy-just-wrote-this');
 });
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));

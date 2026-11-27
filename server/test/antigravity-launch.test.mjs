@@ -25,7 +25,7 @@ process.env.AM_INPUT_REQUIRED_DIR = path.join(TMP, 'input-required');
 
 const sessions = await import('../src/sessions.js');
 const runner = await import('../src/runner.js');
-const { cliById } = await import('../src/config.js');
+const { cliById, agyCommand } = await import('../src/config.js');
 sessions.init();
 
 let pass = 0, fail = 0;
@@ -53,11 +53,14 @@ check('binary is agy', agy.bin, 'agy');
 check('not updated through npm', !!agy.noUpdate && !agy.npm, true);
 
 console.log('\nthe key decides the provider, at launch time');
-check('with a key, the provider is gemini', argvOf(agy.run(), 'k'), '[--settings][{"modelProvider":"gemini"}]');
-check('without one, agy is left to its own sign-in', argvOf(agy.run(), ''), '');
+check('with a key, the provider is gemini', argvOf(agy.run(), 'k'), '[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions]');
+check('without one, agy is left to its own sign-in', argvOf(agy.run(), ''), '[--dangerously-skip-permissions]');
 check('a seeded prompt stays one argument', argvOf(agy.withPrompt("'say hi; now'"), 'k'),
-  '[--settings][{"modelProvider":"gemini"}][-i][say hi; now]');
-check('continue keeps the provider', argvOf(agy.cont(), 'k'), '[--settings][{"modelProvider":"gemini"}][-c]');
+  '[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions][-i][say hi; now]');
+check('continue keeps the provider', argvOf(agy.cont(), 'k'), '[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions][-c]');
+check('a subcommand keeps the provider but not the session-only flag', argvOf(agyCommand('models'), 'k'),
+  '[--settings][{"modelProvider":"gemini"}][models]');
+check('and without a key it is bare', argvOf(agyCommand('models'), ''), '[models]');
 
 console.log('\nfirst launch and restart');
 const s = sessions.create({ name: 'agy', cli: 'antigravity', path: 'proj-a' });
@@ -83,19 +86,42 @@ has('a pane that never shared its folder still continues', runner.commandFor(ses
 
 console.log('\na pinned pane resumes its own conversation by id');
 const ID = '79cd3d9b-b387-44da-91c0-2df98a2ae37e';
-check('resume keeps the provider', argvOf(agy.resume(ID), 'k'), `[--settings][{"modelProvider":"gemini"}][--conversation][${ID}]`);
+check('resume keeps the provider', argvOf(agy.resume(ID), 'k'), `[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions][--conversation][${ID}]`);
 sessions.update(other.id, { path: 'proj-a' });
 sessions.update(s.id, { antigravityConversationId: ID });
 const pinned = runner.commandFor(sessions.get(s.id));
 has('resumes by id, even in a shared folder', pinned, `exec ${agy.resume(ID)}`);
 const conv = path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'conversations');
 const run = (line) => argvOf(line.replaceAll('$HOME', process.env.HOME), 'k');
-check('a missing conversation starts fresh', run(pinned), '[--settings][{"modelProvider":"gemini"}]');
+check('a missing conversation starts fresh', run(pinned), '[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions]');
 fs.mkdirSync(conv, { recursive: true });
 fs.writeFileSync(path.join(conv, `${ID}.db`), '');
-check('an existing one is resumed', run(pinned), `[--settings][{"modelProvider":"gemini"}][--conversation][${ID}]`);
+check('an existing one is resumed', run(pinned), `[--settings][{"modelProvider":"gemini"}][--dangerously-skip-permissions][--conversation][${ID}]`);
 sessions.update(s.id, { antigravityConversationId: 'x; touch /tmp/owned' });
 check('only a uuid reaches the launch line', runner.commandFor(sessions.get(s.id)).includes('owned'), false);
+
+console.log('\nlaunching trusts the folder for agy, and only for agy');
+{
+  const settings = path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'settings.json');
+  // Stubs that exit at once: what matters is what ran before the spawn.
+  for (const b of ['agy', 'gemini']) fs.writeFileSync(path.join(bin, b), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    const a = sessions.create({ name: 'agy-trust', cli: 'antigravity', path: 'trust-a' });
+    const g = sessions.create({ name: 'gem-trust', cli: 'gemini', path: 'trust-g' });
+    runner.ensureRunning(sessions.get(a.id));
+    runner.ensureRunning(sessions.get(g.id));
+    const listed = JSON.parse(fs.readFileSync(settings, 'utf8')).trustedWorkspaces || [];
+    const real = (p) => fs.realpathSync(path.join(DATA, 'workspaces', p));
+    check('the agy folder is trusted by its real path', listed.includes(real('trust-a')), true);
+    check('another CLI\'s folder is not', listed.includes(real('trust-g')), false);
+    check('one entry for one launch', listed.filter((x) => x === real('trust-a')).length, 1);
+  } finally {
+    process.env.PATH = savedPath;
+    await runner.stopAll(2000);
+  }
+}
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
