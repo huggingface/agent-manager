@@ -399,9 +399,9 @@ filter to the same value so they cannot drift.
 
 **The skip field is a token field**, because that is what the data is: a short
 list of folder names, each independently removable. Enter or comma commits,
-Backspace on an empty box takes the last one back. The status API also reports the
-expanded globs — a skip list nobody can see the expansion of is one nobody can
-debug, and §3.8 is why the expansion is not obvious.
+Backspace on an empty box takes the last one back. The status API reports the
+configured tokens and defaults. The Job matches path segments directly; it does
+not expand these tokens as globs.
 
 **No stage in the table.** It read `(running)` for runs that had long finished,
 because `stage || 'RUNNING'` invented an answer whenever the Hub did not give one.

@@ -312,7 +312,7 @@ try:
             keep.append(f)
     kb = sum((f.size or 0) for f in keep)
     say("scope: keeping " + str(len(keep)) + " files (" + format(kb / 1e9, ".2f") + " GB); skipped "
-        + str(n_excl) + " reproducible, " + str(n_cred) + " credential-bearing, "
+        + str(n_excl) + " configured exclusions, " + str(n_cred) + " credential-bearing, "
         + str(n_nohash) + " without a hash")
     say("scope: skipped " + str(len(git_dirs)) + " .git folders; push or use git bundle for local-only work")
     if not keep:
