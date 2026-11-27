@@ -520,6 +520,9 @@ try {
     const stamps = Array.from({ length: 8 }, (_, i) => 1792000000000 + i * 1000);
     for (const s of stamps) put(path.join(e.CLAUDE_DURABLE, `backups/.claude.json.backup.${s}`), `${s}`);
     put(path.join(e.CLAUDE_DURABLE, 'file-history/sess/abc@v1'), 'before edit');
+    const synced = 'skills/synced/org_acct/xlsx/scripts/__init__.py';
+    put(path.join(e.CLAUDE_DURABLE, synced), 'stale');
+    put(path.join(e.CLAUDE_DURABLE, 'skills/open-pr/SKILL.md'), 'mine');
     execFileSync('sh', [script, 'restore'], { env: e });
     check('Codex tmp/, plugin cache and install staging are not restored',
       junk.every((rel) => !fs.existsSync(path.join(e.CODEX_HOME, rel))));
@@ -530,10 +533,19 @@ try {
       JSON.stringify(restoredBackups) === JSON.stringify(stamps.slice(-5).map((s) => `.claude.json.backup.${s}`)), restoredBackups.join(','));
     check('Claude file-history (what /rewind restores from) is restored',
       fs.existsSync(path.join(e.CLAUDE_CONFIG_DIR, 'file-history/sess/abc@v1')));
+    check('Claude skills/synced/ is not restored; the user\'s own skills are',
+      !fs.existsSync(path.join(e.CLAUDE_CONFIG_DIR, 'skills/synced'))
+        && fs.existsSync(path.join(e.CLAUDE_CONFIG_DIR, 'skills/open-pr/SKILL.md')));
+    fs.rmSync(path.join(e.CLAUDE_DURABLE, 'skills/synced'), { recursive: true });
+    put(path.join(e.CLAUDE_CONFIG_DIR, synced), 'new');
+    put(path.join(e.CLAUDE_CONFIG_DIR, 'skills/mine/SKILL.md'), 'new');
     for (const rel of junk) { fs.rmSync(path.join(e.CODEX_DURABLE, rel)); put(path.join(e.CODEX_HOME, rel), 'new junk'); }
     execFileSync('sh', [script, 'checkpoint'], { env: e });
     check('Codex junk written locally is not checkpointed either',
       junk.every((rel) => !fs.existsSync(path.join(e.CODEX_DURABLE, rel))));
+    check('Claude skills/synced/ is not checkpointed; a new skill of the user\'s is',
+      !fs.existsSync(path.join(e.CLAUDE_DURABLE, 'skills/synced'))
+        && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'skills/mine/SKILL.md')));
     fs.rmSync(r, { recursive: true, force: true });
   }
 
@@ -556,6 +568,9 @@ try {
     put(path.join(e.CLAUDE_DURABLE, 'backups/notes.txt'), 'not a backup');
     put(path.join(e.CLAUDE_DURABLE, 'file-history/sess/abc@v1'), 'before edit');
     put(path.join(e.CLAUDE_DURABLE, 'projects/p/s.jsonl'), '{}');
+    put(path.join(e.CLAUDE_DURABLE, 'skills/synced/org_acct/xlsx/SKILL.md'), 'cached');
+    put(path.join(e.CLAUDE_DURABLE, 'skills/synced/org_acct/xlsx/.recalc.py.0xyzq1'), 'rsync leftover');
+    put(path.join(e.CLAUDE_DURABLE, 'skills/open-pr/SKILL.md'), 'mine');
     const out = execFileSync('sh', [script, 'prune'], { env: e, encoding: 'utf8' });
     check('prune removes the excluded Codex junk from the durable side',
       junk.every((rel) => !fs.existsSync(path.join(e.CODEX_DURABLE, rel))), out);
@@ -563,7 +578,10 @@ try {
       keep.every((rel) => fs.existsSync(path.join(e.CODEX_DURABLE, rel)))
         && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'file-history/sess/abc@v1'))
         && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'projects/p/s.jsonl'))
-        && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'backups/notes.txt')));
+        && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'backups/notes.txt'))
+        && fs.existsSync(path.join(e.CLAUDE_DURABLE, 'skills/open-pr/SKILL.md')));
+    check('prune removes Claude skills/synced/ from the durable side',
+      !fs.existsSync(path.join(e.CLAUDE_DURABLE, 'skills/synced')), out);
     check('prune never follows a symlink, at the top or inside a junk tree',
       fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8') === 'keep me'
         && fs.lstatSync(path.join(e.CODEX_DURABLE, 'cache')).isSymbolicLink(), out);
@@ -699,6 +717,7 @@ try {
     put(path.join(e.CODEX_DURABLE, 'sessions/2026/10/19/rollout.jsonl'), '{"turn":1}\n');
     put(path.join(e.CODEX_DURABLE, 'mcp-oauth-locks/4242'), 'pid');
     put(path.join(e.CODEX_DURABLE, 'logs_1.db'), 'not restored');
+    put(path.join(e.CLAUDE_DURABLE, 'skills/synced/org_acct/xlsx/SKILL.md'), 'cached');
     put(path.join(e.FX_DURABLE, 'sessions/s1/events.jsonl'), '{}\n');
     put(path.join(e.FX_DURABLE, 'sessions/s1/session.lock'), 'pid');
     put(path.join(e.GEMINI_DURABLE, 'settings.json'), '{}');
@@ -745,8 +764,8 @@ try {
     check('API: restored files keep the bucket\'s mtimes',
       Math.abs(fs.statSync(path.join(f.e.CLAUDE_CONFIG_DIR, 'projects/p0/s.jsonl')).mtimeMs / 1000 - old) < 1.5);
     const downloads = log.split('\n').filter((l) => l.startsWith('download '));
-    check('API: #180\'s discards are not downloaded (Codex *.db, mcp-oauth-locks, fx locks; old backups)',
-      !downloads.some((l) => /logs_1\.db|mcp-oauth-locks|session\.lock/.test(l))
+    check('API: #180\'s discards are not downloaded (Codex *.db, mcp-oauth-locks, fx locks; Claude skills/synced, old backups)',
+      !downloads.some((l) => /logs_1\.db|mcp-oauth-locks|session\.lock|skills\/synced/.test(l))
         && downloads.filter((l) => /backups\//.test(l)).length === 5, downloads.join(' | '));
     check('API: the mirror is gone afterwards', !fs.existsSync(path.join(f.e.AM_LOCAL, 'agent-state-mirror')));
     fs.rmSync(f.r, { recursive: true, force: true });
