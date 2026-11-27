@@ -368,7 +368,11 @@ bounded() {
 #          curated plugins Codex downloads again — and its install staging.
 #   claude backups/ come back as the newest few only (restore_claude_backups).
 #          file-history/ is kept: it is what /rewind restores edited files from,
-#          for resumed conversations too.
+#          for resumed conversations too. skills/synced/ is Claude Code's copy
+#          of the account's claude.ai skills, which it downloads again; it also
+#          cannot be copied: those skills hold `__init__.py` files, rsync's
+#          temporary for one is `.__init__.py.XXXXXX`, and hf-mount refuses
+#          to create any name starting with `._` (EACCES).
 rsync_adapter() {
   _dir="$1" _key="$2"; shift 2
   case "$_key" in
@@ -378,7 +382,8 @@ rsync_adapter() {
         --exclude '**/cache/***' --exclude '**/.tmp/***' --exclude '**/mcp-oauth-locks/***' \
         --exclude '/tmp/***' --exclude '/plugins/.remote-plugin-install-staging/***' "$@" ;;
     claude)
-      if [ "$_dir" = restore ]; then rsync_tree --exclude '/backups/***' "$@"; else rsync_tree "$@"; fi ;;
+      if [ "$_dir" = restore ]; then set -- --exclude '/backups/***' "$@"; fi
+      rsync_tree --exclude '/skills/synced/***' "$@" ;;
     fx)
       rsync_tree --exclude '*.lock' --exclude 'index.pending' "$@" ;;
     pi) rsync_tree --exclude '*.lock' --exclude '/bin/***' --exclude '/tmp/***' "$@" ;;
@@ -1127,6 +1132,7 @@ mirror_filters() {
       # fetch just those rather than all ~2,400 — which needs a listing we can
       # trust. A failed, hung or unreadable listing is NOT an empty one: it
       # fails this attempt, and the adapter falls back to the mount.
+      echo '- skills/synced/*'
       _ls="$MIRROR_ROOT/$1.backups.json"
       bounded "listing the Claude backups over the API" "$3" \
         hf buckets list "hf://buckets/$2/backups" --format json >"$_ls" 2>"$_ls.err"; _rc=$?
@@ -1507,6 +1513,7 @@ if [ "$MODE" = prune ]; then
   for rel in .tmp tmp cache mcp-oauth-locks plugins/cache plugins/.remote-plugin-install-staging; do
     prune_subtree "$CODEX_DURABLE/$rel"
   done
+  prune_subtree "$CLAUDE_DURABLE/skills/synced"
   # Claude config backups beyond the newest few. What to keep and what to
   # delete come from ONE listing, read and acted on while holding the
   # checkpoint lock, so a backup a checkpoint publishes is either in that

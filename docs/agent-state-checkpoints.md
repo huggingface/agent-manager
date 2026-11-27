@@ -80,8 +80,8 @@ under `$AM_LOCAL/agent-state-mirror/`, with the bucket's mtimes reapplied from
 the plan; the rsync restore described above then runs from that mirror instead
 of from `/data`, so its filters, newest-N Claude backups, SQLite validation and
 `--update` semantics are unchanged. Bulk junk (Codex `tmp/`, caches, `*.db`,
-`mcp-oauth-locks/`; fx locks and `index.pending`; all but the newest Claude
-backups) is filtered out of the download itself. The newest backups come from
+`mcp-oauth-locks/`; fx locks and `index.pending`; Claude's `skills/synced/`
+and all but the newest Claude backups) is filtered out of the download itself. The newest backups come from
 one API listing; a listing that fails, hangs or does not parse is never read as
 "no backups" — Claude then falls back to the mount. Every restore is a full
 one: it deletes any mirror an earlier, killed restore left, each attempt fills
