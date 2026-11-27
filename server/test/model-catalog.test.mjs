@@ -275,3 +275,21 @@ test('refresh: one CLI at a time, a failure keeps the last list, saved to disk',
   }
   if (installed.has('codex')) assert.match(saved.codex.error, /listed no models/);
 });
+
+
+test('pi model table and empty output', () => {
+  assert.deepEqual(catalog.parsePiModels('provider  model  context  max-out  thinking  images\nhuggingface  moonshotai/Kimi-K3.1-Pro  1.0M  1.0M  yes  yes\n'), [{ id: 'huggingface/moonshotai/Kimi-K3.1-Pro' }]);
+  assert.deepEqual(catalog.parsePiModels('No models available. Use /login to authenticate.\n'), []);
+});
+
+test('launch options expose the same HF default used at launch', () => {
+  const old = process.env.HF_TOKEN;
+  process.env.HF_TOKEN = 'test';
+  for (const id of ['pi', 'opencode']) {
+    const entry = catalog.launchOptions().clis.find((c) => c.id === id);
+    assert.equal(entry.defaultModel, config.launchChoice({ cli: id }).model);
+  }
+  delete process.env.HF_TOKEN;
+  assert.equal(catalog.launchOptions().clis.find((c) => c.id === 'pi').defaultModel, null);
+  if (old !== undefined) process.env.HF_TOKEN = old;
+});

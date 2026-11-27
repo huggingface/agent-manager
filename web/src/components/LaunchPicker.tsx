@@ -111,13 +111,13 @@ export default function LaunchPicker({ cli, canModel, value, onChange, disabled 
     <div className="launch-pick">
       {canModel && (models.length ? (
         <select aria-label="Model" title={title} value={value.model || ''} disabled={disabled} onChange={(e) => setModel(e.target.value)}>
-          <option value="">Model: CLI default</option>
+          <option value="">Model: {entry?.defaultModel || 'CLI default'}</option>
           {models.map((m) => <option key={m.id} value={m.id}>{m.label || m.id}</option>)}
         </select>
       ) : (
         // No list (yet): the CLI default, and the way to ask again.
         <select aria-label="Model" disabled title={entry?.error || undefined} value="">
-          <option value="">{busy ? 'Model: listing…' : 'Model: CLI default (no list)'}</option>
+          <option value="">{busy ? 'Model: listing…' : `Model: ${entry?.defaultModel || 'CLI default'} (no list)`}</option>
         </select>
       ))}
       {efforts.length > 0 && (

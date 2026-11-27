@@ -224,3 +224,5 @@ from huggingface_hub import HfApi, delete_bucket
 HfApi().delete_repo("you/am-dev-2", repo_type="space")
 delete_bucket("you/am-dev-2-data")   # buckets are not a repo_type — own function
 ```
+
+pi stores its sessions in `PI_CODING_AGENT_DIR`; Agent Manager checkpoints that tree and pins each pane with `--session-id`. See [pi trace format](trace-schemas/pi.md) for current limitations.

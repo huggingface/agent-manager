@@ -1293,7 +1293,7 @@ const BREADCRUMB_MS = 250;
 const BREADCRUMB_RETRY_MS = 500;
 const BREADCRUMB_RETRIES = 20;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const CONVERSATION_ID = { claude: UUID, codex: UUID, opencode: /^ses_[A-Za-z0-9_-]+$/ };
+const CONVERSATION_ID = { claude: UUID, codex: UUID, pi: UUID, opencode: /^ses_[A-Za-z0-9_-]+$/ };
 
 // Read AND remove the pane's breadcrumb — consumed on read, so a stale crumb
 // can never flip a pin backwards after a later, scan-based re-pin.
@@ -2010,6 +2010,12 @@ export function commandFor(session) {
     const projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"';
     const hasTranscript = `[ -n "$(find ${projects} -name '${session.sessionUuid}*' -print -quit 2>/dev/null)" ]`;
     return `if ${hasTranscript}; then exec ${cli.resume(session.sessionUuid, f)}; else ${fresh}; fi`;
+  }
+
+  if (cli.id === 'pi') {
+    if (!UUID.test(session.sessionUuid || '')) throw new Error('pi session requires a valid session UUID');
+    const seed = !session.everStarted ? [...q0Images.map((i) => `@${i}`), q0].filter(Boolean).join(' ') : '';
+    return `exec ${cli.resume(session.sessionUuid, f)}${seed ? ` -- ${seed}` : ''}`;
   }
 
   // OpenClaw: first run needs its onboarding wizard (keys, workspace); once the

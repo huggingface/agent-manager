@@ -88,6 +88,7 @@ const writeFakeNpm = (failing) => {
     '    @openai/codex*) name=codex ;;',
     '    @google/gemini-cli*) name=gemini ;;',
     '    opencode-ai*) name=opencode ;;',
+    '    @earendil-works/pi-coding-agent*) name=pi ;;',
     '    openclaw*) name=openclaw ;;',
     '    *) continue ;;',
     '  esac',

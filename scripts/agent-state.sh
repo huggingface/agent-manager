@@ -37,6 +37,8 @@ GEMINI_LIVE="${GEMINI_LIVE:-$GEMINI_CLI_HOME/.gemini}"
 GEMINI_DURABLE="${GEMINI_DURABLE:-$DATA_DIR/state/gemini}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$AM_LOCAL/oc-home/.openclaw}"
 OPENCLAW_DURABLE="${OPENCLAW_DURABLE:-$DATA_DIR/state/openclaw-backup}"
+PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$AM_LOCAL/pi-agent}"
+PI_DURABLE="${PI_DURABLE:-$DATA_DIR/state/pi}"
 OPENCODE_LIVE="${OPENCODE_LIVE:-$AM_LOCAL/opencode-share}"
 OPENCODE_DURABLE="${OPENCODE_DURABLE:-$DATA_DIR/state/opencode}"
 HERMES_LIVE="${HERMES_LIVE:-$AM_LOCAL/hermes}"
@@ -379,6 +381,7 @@ rsync_adapter() {
       if [ "$_dir" = restore ]; then rsync_tree --exclude '/backups/***' "$@"; else rsync_tree "$@"; fi ;;
     fx)
       rsync_tree --exclude '*.lock' --exclude 'index.pending' "$@" ;;
+    pi) rsync_tree --exclude '*.lock' --exclude '/bin/***' --exclude '/tmp/***' "$@" ;;
     antigravity)
       # Databases go through checkpoint_antigravity, never a raw copy. On a
       # restore, the valid live databases restore_antigravity listed stay as
@@ -1105,6 +1108,8 @@ mirror_filters() {
         '- db-backups/*' '- */db-backups/*' '- plugins/.remote-plugin-install-staging/*' \
         '- mcp-oauth-locks/*' '- */mcp-oauth-locks/*' \
         '- *.sqlite*' '- *.db' '- *.db-*' '- *-wal' '- *-shm' ;;
+    pi)
+      printf '%s\n' '- *.lock' '- bin/*' '- tmp/*' ;;
     fx)
       printf '%s\n' '- *.lock' '- index.pending' '- */index.pending' ;;
     antigravity)
@@ -1245,6 +1250,7 @@ restore_claude() {
 }
 restore_gemini() { restore_tree gemini "$1" "$GEMINI_LIVE"; }
 restore_openclaw() { restore_tree openclaw "$1" "$OPENCLAW_STATE_DIR"; }
+restore_pi() { restore_tree pi "$1" "$PI_CODING_AGENT_DIR"; }
 restore_opencode() { restore_sqlite_tree "$1" "$OPENCODE_LIVE" opencode.db opencode.db; }
 restore_hermes() { restore_sqlite_tree "$1" "$HERMES_LIVE" state.db state.db; }
 restore_fx() { restore_tree fx "$1" "$FX_LIVE"; }
@@ -1282,11 +1288,12 @@ checkpoint_home() {
   checkpoint_tree home "$1" "$2"
 }
 
-ADAPTERS="codex claude gemini openclaw opencode hermes fx antigravity"
+ADAPTERS="codex claude gemini openclaw pi opencode hermes fx antigravity"
 [ "$HOME_ENABLED" = 1 ] && ADAPTERS="$ADAPTERS home"
 live_of() {
   case "$1" in
     codex) echo "$CODEX_HOME" ;; claude) echo "$CLAUDE_CONFIG_DIR" ;; gemini) echo "$GEMINI_LIVE" ;;
+    pi) echo "$PI_CODING_AGENT_DIR" ;;
     openclaw) echo "$OPENCLAW_STATE_DIR" ;; opencode) echo "$OPENCODE_LIVE" ;; hermes) echo "$HERMES_LIVE" ;;
     fx) echo "$FX_LIVE" ;; antigravity) echo "$ANTIGRAVITY_LIVE" ;; home) echo "$HOME_LIVE" ;;
   esac
@@ -1294,6 +1301,7 @@ live_of() {
 durable_of() {
   case "$1" in
     codex) echo "$CODEX_DURABLE" ;; claude) echo "$CLAUDE_DURABLE" ;; gemini) echo "$GEMINI_DURABLE" ;;
+    pi) echo "$PI_DURABLE" ;;
     openclaw) echo "$OPENCLAW_DURABLE" ;; opencode) echo "$OPENCODE_DURABLE" ;; hermes) echo "$HERMES_DURABLE" ;;
     fx) echo "$FX_DURABLE" ;; antigravity) echo "$ANTIGRAVITY_DURABLE" ;; home) echo "$HOME_DURABLE" ;;
   esac
@@ -1563,7 +1571,7 @@ fi
 # (whose environment exports these very paths) orphaned six open Codex
 # rollouts. At boot no agent runs yet, so the check costs nothing there.
 open_in_live_roots() {
-  ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v roots="$CODEX_HOME|$CLAUDE_CONFIG_DIR|$GEMINI_LIVE|$OPENCLAW_STATE_DIR|$OPENCODE_LIVE|$HERMES_LIVE|$FX_LIVE|$ANTIGRAVITY_LIVE" '
+  ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v roots="$CODEX_HOME|$CLAUDE_CONFIG_DIR|$GEMINI_LIVE|$OPENCLAW_STATE_DIR|$PI_CODING_AGENT_DIR|$OPENCODE_LIVE|$HERMES_LIVE|$FX_LIVE|$ANTIGRAVITY_LIVE" '
     BEGIN { n = split(roots, r, "|") }
     /^\/proc\/[0-9]+\/fd:$/ { pid = $0; sub(/^\/proc\//, "", pid); sub(/\/fd:$/, "", pid); next }
     / -> / { t = $0; sub(/^.* -> /, "", t)
@@ -1688,6 +1696,7 @@ else
   run_checkpoint claude checkpoint_tree claude "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE"
   run_checkpoint gemini checkpoint_tree gemini "$GEMINI_LIVE" "$GEMINI_DURABLE"
   run_checkpoint openclaw checkpoint_tree openclaw "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE"
+  run_checkpoint pi checkpoint_tree pi "$PI_CODING_AGENT_DIR" "$PI_DURABLE"
   run_checkpoint opencode checkpoint_sqlite_tree "$OPENCODE_LIVE" "$OPENCODE_DURABLE" opencode.db opencode.db
   run_checkpoint hermes checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db
   run_checkpoint fx checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE"

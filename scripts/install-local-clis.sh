@@ -9,11 +9,11 @@ prefix="${NPM_CONFIG_PREFIX:-$HOME/.local}"
 export NPM_CONFIG_PREFIX="$prefix"
 export PATH="$prefix/bin:$PATH"
 
-selected="${*:-claude codex gemini opencode openclaw}"
+selected="${*:-claude codex gemini opencode pi openclaw}"
 
 # Required versus optional, matching the Dockerfile exactly: it installs Claude
-# and Codex unconditionally and lets Gemini, opencode and OpenClaw fail with a
-# note (`|| echo "... install failed"`). Those three routinely refuse to install
+# and Codex unconditionally and lets Gemini, opencode, pi and OpenClaw fail with a
+# note (`|| echo "... install failed"`). Some may refuse to install
 # on a Node version the others accept, so making them fatal here meant the
 # recommended no-argument run could not finish on a supported runtime — and the
 # manager already reports a missing CLI as unavailable rather than breaking.
@@ -24,10 +24,11 @@ for cli in $selected; do
     claude)   package='@anthropic-ai/claude-code@latest'; binary='claude';   optional=0 ;;
     codex)    package='@openai/codex@latest';             binary='codex';    optional=0 ;;
     gemini)   package='@google/gemini-cli@latest';        binary='gemini';   optional=1 ;;
+    pi) package='@earendil-works/pi-coding-agent@latest'; binary='pi'; optional=1 ;;
     opencode) package='opencode-ai@latest';               binary='opencode'; optional=1 ;;
     openclaw) package='openclaw@latest';                  binary='openclaw'; optional=1 ;;
     *)
-      echo "unknown CLI '$cli' (expected: claude codex gemini opencode openclaw)" >&2
+      echo "unknown CLI '$cli' (expected: claude codex gemini opencode pi openclaw)" >&2
       exit 2
       ;;
   esac

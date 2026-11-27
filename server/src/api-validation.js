@@ -65,7 +65,7 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
     if (route === '/api/operations') queryNumber('limit', 1, 1000);
     if (route.endsWith('/dispatches')) queryNumber('since', 0);
     if (route === '/api/usage') {
-      optional(q, 'provider', oneOf, ['', 'claude', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini']);
+      optional(q, 'provider', oneOf, ['', 'claude', 'codex', 'opencode', 'pi', 'hermes', 'openclaw', 'gemini']);
       optional(q, 'debug', oneOf, ['0', '1']);
     }
     if (route.endsWith('/tail')) queryNumber('lines', 1); // existing clients request >2000; capture still clamps

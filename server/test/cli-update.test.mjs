@@ -57,7 +57,7 @@ assert.equal(
   plan.targets.length + plan.excluded.length, agents.length,
   'every agent CLI is either updatable or explicitly excluded — a new one cannot land in neither and be skipped in silence',
 );
-assert.deepEqual(plan.targets.map((t) => t.id), ['claude', 'codex', 'gemini', 'opencode', 'openclaw']);
+assert.deepEqual(plan.targets.map((t) => t.id), ['claude', 'codex', 'gemini', 'opencode', 'pi', 'openclaw']);
 assert.deepEqual(plan.excluded.map((e) => e.id), ['antigravity', 'hermes', 'fx'], 'the three non-npm CLIs are named, not dropped');
 for (const e of plan.excluded) assert.ok(e.reason.length > 10, `${e.id} says why it cannot be updated here`);
 for (const t of plan.targets) assert.ok(persistSnippet().includes(`${t.npm}@latest`), `${t.id} is in the durable snippet`);

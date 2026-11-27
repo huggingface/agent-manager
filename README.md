@@ -15,7 +15,7 @@ short_description: Private cloud manager for AI coding CLI sessions
 
 **Your coding agents, together in one private workspace.**
 
-Run Claude Code, Codex, Antigravity CLI, opencode, Hermes, OpenClaw and fx from
+Run Claude Code, Codex, Antigravity CLI, opencode, pi, Hermes, OpenClaw and fx from
 your browser. Follow several tasks side by side, read the conversation or open
 the terminal, and pick up from another device while your Space stays running.
 

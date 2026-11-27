@@ -1620,6 +1620,7 @@ const NON_SECRET = new Set([
   'HOME', 'AM_DURABLE_HOME', 'AM_LIVE_HOME',
   'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
   'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
+  'PI_CODING_AGENT_DIR', 'PI_AGENT_DIR', 'PI_DURABLE', 'PI_TELEMETRY', 'PI_SKIP_VERSION_CHECK',
   'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
   'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
   'FX_LIVE', 'FX_DURABLE', 'ANTIGRAVITY_LIVE', 'ANTIGRAVITY_DURABLE',
@@ -2396,7 +2397,7 @@ tell you what actually happened.
 
 ### Check harness usage and quota
 The same API exposes usage from harness logs on this Space. Claude and Codex
-include their latest 5-hour and weekly quota snapshots. OpenCode, Hermes, and
+include their latest 5-hour and weekly quota snapshots. OpenCode, pi, Hermes, and
 OpenClaw expose tokens and estimated model cost; they have no single quota
 because sessions may use different providers:
 
@@ -2405,6 +2406,7 @@ curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-$
 curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
 curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
 curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=pi" | jq .providers.pi
 curl -s -H 'X-AM-Request: 1' "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
 \`\`\`
 

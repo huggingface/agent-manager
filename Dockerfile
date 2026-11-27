@@ -24,7 +24,7 @@ FROM node:24-bookworm AS runtime
 # agents and humans reach for (jq/htop/sqlite3/editors/media, fonts so headless
 # Chromium screenshots don't render tofu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux git git-lfs ca-certificates curl python3 make g++ ripgrep bubblewrap rsync util-linux \
+      tmux git git-lfs ca-certificates curl python3 make g++ ripgrep fd-find bubblewrap rsync util-linux \
       jq htop lsof tree ncdu sqlite3 vim nano zip unzip file procps less \
       ffmpeg imagemagick fonts-liberation fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/* \
@@ -66,6 +66,7 @@ RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
 # defaults layer adds an observation-only ToolPermission hook without replacing
 # any user or project hooks.
 COPY gemini-system-defaults.json /etc/gemini-cli/system-defaults.json
+RUN npm install -g @earendil-works/pi-coding-agent@latest || echo "pi install failed"
 RUN npm install -g opencode-ai@latest || echo "opencode install failed"
 RUN npm install -g openclaw@latest || echo "openclaw install failed"
 # fx (Vercel Labs) and Antigravity CLI (`agy`, Google) each ship as one native
@@ -235,7 +236,7 @@ RUN set +e; \
     printf '  %-10s %s\n' python3 "$(python3 --version 2>&1)"; \
     echo "  ----------------------------------------------------------"; \
     missing=""; \
-    for c in claude codex gemini agy opencode openclaw hermes fx ccusage uv hf; do \
+    for c in claude codex gemini agy opencode pi openclaw hermes fx ccusage uv hf; do \
       path="$(command -v "$c" 2>/dev/null)"; \
       if [ -n "$path" ]; then \
         ver="$(timeout 30 "$c" --version 2>&1 | head -1 | tr -d '\r')"; \
