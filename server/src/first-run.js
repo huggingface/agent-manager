@@ -2,7 +2,7 @@
 // keeping Claude Code from aging out restored transcripts.
 //
 // Everything here is measured against the installed CLIs rather than read off
-// their docs; docs/first-run-dialogs.md records the runs. Three facts shape the
+// their docs; docs/first-run-dialogs.md records the runs. Four facts shape the
 // design, and each one narrows what has to be written at runtime:
 //
 //   1. Claude Code 2.1.232 INHERITS folder trust from a parent. Trusting the
@@ -12,7 +12,10 @@
 //      itself — a `-c` override does not reach the check. So its answer has to
 //      be written, but it is APPENDED: a few bytes at the end, never a rewrite
 //      of anybody else's, which is the difference that matters below.
-//   3. Codex's blocking "Update available!" screen is driven by its own
+//   3. Antigravity (agy) does not inherit either, and keeps an exact-path list
+//      in a JSON settings file it also writes — so its answer is a checked
+//      rewrite, the narrowest one JSON allows (see trustAgyWorkspace).
+//   4. Codex's blocking "Update available!" screen is driven by its own
 //      `version.json` cache and is suppressed by that file's `dismissed_version`
 //      — the same field its "Skip until next version" option writes.
 //
@@ -22,11 +25,13 @@
 // lost concurrent write deterministically, and the loss is silent because
 // nothing ends up malformed. The rule now is: never rewrite CLI-owned state on
 // the session path, and when boot has to write, write once and only if needed.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse as tomlParse } from 'smol-toml';
 import { WORKSPACES_DIR } from './config.js';
+import { agyHome } from './antigravity.js';
 
 const homeDir = () => process.env.HOME || os.homedir();
 
@@ -238,5 +243,93 @@ export function trustCodexWorkspace(dir) {
   } catch (e) {
     console.warn(`[first-run] could not trust ${dir} for codex: ${e && e.message}`);
     return false;
+  }
+}
+
+export const agySettingsFile = () => path.join(agyHome(), 'settings.json');
+
+/**
+ * Trust one workspace for Antigravity (`agy`).
+ *
+ * agy, like Codex, does not inherit trust: it keeps an exact-path list,
+ * `trustedWorkspaces`, in its own settings.json, and asks "Trust this folder?"
+ * for anything not on it. Unlike Codex's TOML this file is JSON, so it cannot
+ * be appended to — the answer has to be a rewrite of a file agy also writes
+ * (`model`, `toolPermission`, …). That is exactly what the header warns about,
+ * so the rewrite is kept as small and as checked as a rewrite can be:
+ *
+ *   - already listed → nothing is written, so a steady state never writes;
+ *   - otherwise one entry is added and every other key keeps its value and
+ *     order (JSON.parse/stringify round-trip, agy's own 2-space layout and
+ *     trailing-newline choice kept);
+ *   - written to a unique temp file beside it and renamed over it, so agy never
+ *     reads a torn file;
+ *   - the file is read again right before the rename, and if anything changed
+ *     since the first read we abort and leave agy's write standing. The cost of
+ *     losing that race is the dialog appearing once, never agy's settings.
+ *
+ * The re-read narrows the window to the gap between it and the rename; it does
+ * not close it, because there is no lock agy honours. It is the same trade the
+ * Codex version makes: our few bytes may be lost, theirs should not be.
+ *
+ * A file that is not JSON, not an object, or whose `trustedWorkspaces` is not
+ * an array is left alone. A missing file is created with just the one entry.
+ */
+export function trustAgyWorkspace(dir) {
+  if (!dir || !path.isAbsolute(dir)) return false;
+  const file = agySettingsFile();
+  const snapshot = () => {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      const st = fs.statSync(file);
+      return { text, size: st.size, mtimeMs: st.mtimeMs, mode: st.mode & 0o777 };
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      throw e;
+    }
+  };
+  const same = (a, b) => (a === null || b === null)
+    ? a === b
+    : a.text === b.text && a.size === b.size && a.mtimeMs === b.mtimeMs;
+  let tmp = null;
+  try {
+    const before = snapshot();
+    let cfg = {};
+    if (before !== null) {
+      try {
+        cfg = JSON.parse(before.text);
+      } catch {
+        console.warn(`[first-run] ${file} is not valid JSON; leaving it alone (agy will ask about ${dir})`);
+        return false;
+      }
+      if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) {
+        console.warn(`[first-run] ${file} is not an object; leaving it alone (agy will ask about ${dir})`);
+        return false;
+      }
+    }
+    if (cfg.trustedWorkspaces !== undefined && !Array.isArray(cfg.trustedWorkspaces)) {
+      console.warn(`[first-run] ${file} has a trustedWorkspaces that is not an array; leaving it alone`);
+      return false;
+    }
+    if ((cfg.trustedWorkspaces || []).includes(dir)) return false;
+    cfg.trustedWorkspaces = [...(cfg.trustedWorkspaces || []), dir];
+    const newline = before === null || before.text.endsWith('\n') ? '\n' : '';
+    const text = `${JSON.stringify(cfg, null, 2)}${newline}`;
+
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tmp = path.join(path.dirname(file), `.${path.basename(file)}.am-${process.pid}-${crypto.randomUUID()}`);
+    fs.writeFileSync(tmp, text, { mode: before ? before.mode : 0o644, flag: 'wx' });
+    if (!same(before, snapshot())) {
+      console.warn(`[first-run] ${file} changed while trusting ${dir}; leaving agy's write standing (it may ask once)`);
+      return false;
+    }
+    fs.renameSync(tmp, file);
+    tmp = null;
+    return true;
+  } catch (e) {
+    console.warn(`[first-run] could not trust ${dir} for agy: ${e && e.message}`);
+    return false;
+  } finally {
+    if (tmp) try { fs.unlinkSync(tmp); } catch { /* already gone */ }
   }
 }

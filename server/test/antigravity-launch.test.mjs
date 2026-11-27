@@ -97,6 +97,29 @@ check('an existing one is resumed', run(pinned), `[--settings][{"modelProvider":
 sessions.update(s.id, { antigravityConversationId: 'x; touch /tmp/owned' });
 check('only a uuid reaches the launch line', runner.commandFor(sessions.get(s.id)).includes('owned'), false);
 
+console.log('\nlaunching trusts the folder for agy, and only for agy');
+{
+  const settings = path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'settings.json');
+  // Stubs that exit at once: what matters is what ran before the spawn.
+  for (const b of ['agy', 'gemini']) fs.writeFileSync(path.join(bin, b), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    const a = sessions.create({ name: 'agy-trust', cli: 'antigravity', path: 'trust-a' });
+    const g = sessions.create({ name: 'gem-trust', cli: 'gemini', path: 'trust-g' });
+    runner.ensureRunning(sessions.get(a.id));
+    runner.ensureRunning(sessions.get(g.id));
+    const listed = JSON.parse(fs.readFileSync(settings, 'utf8')).trustedWorkspaces || [];
+    const real = (p) => fs.realpathSync(path.join(DATA, 'workspaces', p));
+    check('the agy folder is trusted by its real path', listed.includes(real('trust-a')), true);
+    check('another CLI\'s folder is not', listed.includes(real('trust-g')), false);
+    check('one entry for one launch', listed.filter((x) => x === real('trust-a')).length, 1);
+  } finally {
+    process.env.PATH = savedPath;
+    await runner.stopAll(2000);
+  }
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
