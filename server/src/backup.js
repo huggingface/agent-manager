@@ -560,8 +560,12 @@ export function parseBackupLogs(out) {
   const gitFoldersSkipped = countLine ? Number(countLine.match(/^scope: skipped (\d+)/)[1]) : null;
   // Only the Job's controlled refusal is safe to persist. Other exceptions can
   // contain arbitrary Hub response bodies, including token values.
-  const refusal = [...lines].reverse().find((l) => l.startsWith('refusing to commit:')
-    || /^refusing to back up: (?:staging bucket is the source bucket|(?:bucket|dataset) [A-Za-z0-9._-]+\/[A-Za-z0-9._-]+ is not private|step=(?:initialization|install|privacy|staging|list|snapshot|sync|scrub|verify|commit) type=[A-Za-z][A-Za-z0-9_]{0,79} status=(?:unknown|[1-5][0-9]{2}) request_id=(?:unknown|[a-fA-F0-9-]{8,64}|Root=1-[a-fA-F0-9]{8}-[a-fA-F0-9]{24}(?:;[a-fA-F0-9-]{8,64})?))$/.test(l));
+  const refusal = [...lines].reverse().find((l) => {
+    if (l.startsWith('refusing to commit:')) return true;
+    const privacy = /^refusing to back up: (?:bucket|dataset) ([^ ]+) is not private$/.exec(l);
+    if (privacy) return validRepoId(privacy[1]);
+    return /^refusing to back up: (?:staging bucket is the source bucket|step=(?:initialization|install|privacy|staging|list|snapshot|sync|scrub|verify|commit) type=[A-Za-z][A-Za-z0-9_]{0,79} status=(?:unknown|[1-5][0-9]{2}) request_id=(?:unknown|[a-fA-F0-9-]{8,64}|Root=1-[a-fA-F0-9]{8}-[a-fA-F0-9]{24}(?:;[a-fA-F0-9-]{8,64})?))$/.test(l);
+  });
   return { gitFoldersSkipped, reason: refusal ? refusal.slice(0, 300) : null };
 }
 

@@ -118,6 +118,8 @@ test('controlled backup refusals survive parsing, arbitrary text does not', () =
     assert.equal(parseBackupLogs(line).reason, line);
   }
   assert.equal(parseBackupLogs('refusing to back up: secret stuff').reason, null);
+  assert.equal(parseBackupLogs('refusing to back up: bucket ../bad is not private').reason, null);
+  assert.equal(parseBackupLogs('refusing to back up: bucket ns/' + 'x'.repeat(100) + ' is not private').reason, null);
 });
 
 test('completed outcomes expose Git count, preserve it on early failures, and guard the source', () => {
