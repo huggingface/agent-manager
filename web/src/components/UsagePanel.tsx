@@ -13,6 +13,7 @@ import Logo from './Logo';
 const PROVS = [
   { id: 'claude', label: 'Claude Code', color: '#d97757' },
   { id: 'codex', label: 'Codex', color: '#5eb6a6' },
+  { id: 'pi', label: 'pi', color: '#d08a6d' },
   { id: 'opencode', label: 'OpenCode', color: '#8a93a0' },
   { id: 'hermes', label: 'Hermes', color: '#a78bfa' },
   { id: 'openclaw', label: 'OpenClaw', color: '#c83636' },
@@ -169,7 +170,7 @@ export default function UsagePanel() {
                   </div>
                 ) : p.id === 'gemini' ? (
                   <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
-                ) : ['opencode', 'hermes', 'openclaw'].includes(p.id) ? (
+                ) : ['opencode', 'pi', 'hermes', 'openclaw'].includes(p.id) ? (
                   <div className="s-help">No single quota — cost depends on the model provider used by each session.</div>
                 ) : (
                   <div className="s-help">No quota yet — run a session to populate.</div>
@@ -182,7 +183,7 @@ export default function UsagePanel() {
 
       <h3>Traces</h3>
       <div className="s-help">
-        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw, fx) —
+        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, pi, Hermes, OpenClaw, fx) —
         hover the tools count for the breakdown, tokens-in for the cache share. Zero-token session rows are hidden;
         the total still counts traces of deleted agents and all other parsed activity.
       </div>

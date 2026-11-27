@@ -421,9 +421,9 @@ test('home adapter preserves newer local dotfiles on hot restart, re-ensures bro
   const r = spawnSync('sh', [stateScript, 'restore'], { env: stateEnv, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
 
-  // Bucket API synced all 9 adapters (8 harnesses + home), excluding caches & .bucket-* at download time.
+  // Bucket API synced all 10 adapters (9 harnesses + home), excluding caches & .bucket-* at download time.
   const log = fs.readFileSync(hfLog, 'utf8');
-  assert.equal((log.match(/ --plan /g) || []).length, 9, log);
+  assert.equal((log.match(/ --plan /g) || []).length, 10, log);
   assert.match(log, /hf buckets sync hf:\/\/buckets\/test\/bucket\/home /);
   assert.doesNotMatch(log, /download \.cache\//);
   assert.doesNotMatch(log, /download .*\.bucket-/);

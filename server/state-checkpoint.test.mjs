@@ -33,6 +33,8 @@ const env = {
   GEMINI_DURABLE: path.join(data, 'state/gemini'),
   OPENCLAW_STATE_DIR: path.join(local, 'openclaw'),
   OPENCLAW_DURABLE: path.join(data, 'state/openclaw'),
+  PI_CODING_AGENT_DIR: path.join(local, 'pi-agent'),
+  PI_DURABLE: path.join(data, 'state/pi'),
   OPENCODE_LIVE: path.join(local, 'opencode'),
   OPENCODE_DURABLE: path.join(data, 'state/opencode'),
   HERMES_LIVE: path.join(local, 'hermes'),
@@ -79,6 +81,10 @@ try {
   put(path.join(env.CLAUDE_DURABLE, claudeRel), '{"turn":1}\n');
   put(path.join(env.GEMINI_DURABLE, geminiRel), '{"turn":1}\n');
   put(path.join(env.OPENCLAW_DURABLE, clawRel), '{"turn":1}\n');
+  put(path.join(env.PI_DURABLE, 'sessions/work/one.jsonl'), 'pi trace');
+  put(path.join(env.PI_DURABLE, 'bin/fd'), 'binary');
+  put(path.join(env.PI_DURABLE, 'tmp/temporary'), 'temporary');
+  put(path.join(env.PI_DURABLE, 'sessions/work/auth.lock'), 'lock');
   put(path.join(env.FX_DURABLE, fxRel), '{"kind":"session_started"}\n');
   // A durable tree written before the excludes existed can still hold these.
   put(path.join(env.FX_DURABLE, 'sessions/1787565046083-1787565046083966744-936b6f5838945f4a/session.lock'), 'pid\n');
@@ -94,6 +100,11 @@ try {
     fs.readFileSync(path.join(env.GEMINI_LIVE, geminiRel), 'utf8') === '{"turn":1}\n');
   check('OpenClaw transcript restores locally',
     fs.readFileSync(path.join(env.OPENCLAW_STATE_DIR, clawRel), 'utf8') === '{"turn":1}\n');
+  check('pi transcript restores without transient files',
+    fs.readFileSync(path.join(env.PI_CODING_AGENT_DIR, 'sessions/work/one.jsonl'), 'utf8') === 'pi trace'
+      && !fs.existsSync(path.join(env.PI_CODING_AGENT_DIR, 'bin/fd'))
+      && !fs.existsSync(path.join(env.PI_CODING_AGENT_DIR, 'tmp/temporary'))
+      && !fs.existsSync(path.join(env.PI_CODING_AGENT_DIR, 'sessions/work/auth.lock')));
   check('fx transcript restores locally',
     fs.readFileSync(path.join(env.FX_LIVE, fxRel), 'utf8') === '{"kind":"session_started"}\n');
   // A lock names a process that died with the old container, and the pending
@@ -137,6 +148,17 @@ try {
     fs.readFileSync(path.join(env.OPENCODE_DURABLE, 'setup.json'), 'utf8') === '{"configured":true}\n');
   check('Hermes ordinary files checkpoint before state.db exists',
     fs.readFileSync(path.join(env.HERMES_DURABLE, 'config.yaml'), 'utf8') === 'configured: true\n');
+
+  put(path.join(env.PI_CODING_AGENT_DIR, 'sessions/work/two.jsonl'), 'new pi trace');
+  put(path.join(env.PI_CODING_AGENT_DIR, 'bin/local'), 'binary');
+  put(path.join(env.PI_CODING_AGENT_DIR, 'tmp/local'), 'temporary');
+  put(path.join(env.PI_CODING_AGENT_DIR, 'auth.lock'), 'lock');
+  run('checkpoint');
+  check('pi checkpoints its trace but excludes transient files',
+    fs.readFileSync(path.join(env.PI_DURABLE, 'sessions/work/two.jsonl'), 'utf8') === 'new pi trace'
+      && !fs.existsSync(path.join(env.PI_DURABLE, 'bin/local'))
+      && !fs.existsSync(path.join(env.PI_DURABLE, 'tmp/local'))
+      && !fs.existsSync(path.join(env.PI_DURABLE, 'auth.lock')));
 
   // fx: the credential and the transcript must reach the bucket; its live locks
   // must not, or a restored container starts against a lock nobody holds.
@@ -716,7 +738,7 @@ try {
     const log = f.hfLog();
     check('API: the restore succeeds over the bucket API', res.code === 0 && f.restored(), res.out.slice(-800));
     check('API: every adapter is planned and applied over the API',
-      (log.match(/ --plan /g) || []).length === 8 && (log.match(/ --apply /g) || []).length === 8, log);
+      (log.match(/ --plan /g) || []).length === 9 && (log.match(/ --apply /g) || []).length === 9, log);
     check('API: nothing is read from the mount directly', rsyncTrace(f.trace, 'mount').runs === 0, JSON.stringify(rsyncTrace(f.trace, 'mount')));
     check('API: copies from the local mirror still run in parallel', rsyncTrace(f.trace, 'other').most > 1, JSON.stringify(rsyncTrace(f.trace, 'other')));
     check('API: exactly the newest five Claude backups come back', f.backups());
@@ -742,7 +764,7 @@ try {
     check('no token: restores from the mount, with a hint to add HF_TOKEN',
       res.code === 0 && f.restored() && f.backups() && f.hfLog() === ''
         && /bucket API not usable \(HF_TOKEN is not set; add an HF_TOKEN that can read the bucket/.test(text), text.slice(-800));
-    check('mount reads run strictly one at a time across all eight adapters',
+    check('mount reads run strictly one at a time across all nine adapters',
       mount.runs >= 8 && mount.most === 1, JSON.stringify(mount));
     fs.rmSync(f.r, { recursive: true, force: true });
   }

@@ -15,6 +15,7 @@ One page per CLI:
 | Gemini CLI | [gemini.md](gemini.md) | 0.66.0 |
 | OpenCode | [opencode.md](opencode.md) | 1.19.5 |
 | Hermes | [hermes.md](hermes.md) | v0.22.5 (git tag; `hermes --version` fails on this Space) |
+| pi | [pi.md](pi.md) | 1.6.1 |
 | OpenClaw | [openclaw.md](openclaw.md) | 2026.10.8 |
 | fx | [fx.md](fx.md) | 0.0.5 |
 | Antigravity `agy` | [agy.md](agy.md) | branch `feat/antigravity-cli` (PR #227) at `8c287ea`, reader at `5004047`; not installed |
@@ -36,6 +37,7 @@ state directories), the `codex-*.md` pages (shared Codex).
 | gemini | JSONL, append-only, last record per id wins | yes, but a new file per launch | **none** | **none** | **none** | no | no | Notification hook → marker; OSC 9 |
 | opencode | SQLite (WAL), shared | no, one DB for all | `readOpencode` | `normalizeOpencodeDb` | `opencodeSessionId` | no | no | plugin events → marker |
 | hermes | SQLite, shared | no, one DB for all | `readHermes` | `normalizeHermesDb` | none (cwd only) | no | no | none |
+| pi | JSONL | yes | `parsePi` | `normalizePi` | `sessionUuid` | no | no | none |
 | openclaw | JSONL | yes, but one agent shared by every pane | `parseOpenClaw` | `normalizeOpenClaw` | none (single-pane only) | no | no | none |
 | fx | JSONL `events.jsonl` | yes | `parseFx` | `normalizeFx` | `fxSessionId` | yes | no | none |
 | agy | SQLite `steps` with protobuf payloads; also a JSONL `transcript.jsonl` | yes, one DB per conversation | `parseAgy` (PR #227, `5004047`) | `normalizeAgyDb` (PR #227) | `antigravityConversationId` (PR #227) | yes, last step in flight (PR #227) | yes (PR #227) | none (status 9 decoded, not wired) |

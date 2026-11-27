@@ -15,6 +15,7 @@ CLI's shared default cannot move it. See `launch` in `server/src/config.js`.
 | claude | `--model` | `--effort` low…max | its own `/model` picker (below); aliases if that fails |
 | codex | `-m` | `-c model_reasoning_effort=` per model | `codex debug models` |
 | gemini | `-m` | — (settings file only) | `VALID_GEMINI_MODELS` in the installed gemini-cli bundle |
+| pi | `--model provider/model` | `--thinking` | `pi --list-models` |
 | opencode | `-m provider/model` | — (TUI ignores a config variant) | `opencode models` |
 | antigravity | `--model` (ids carry a tier, e.g. `gemini-4-argon-high`) | `--effort` low…max | `agy models` (network; the `modelProvider: gemini` setting when only `GEMINI_API_KEY` is set) |
 | hermes | `--provider` + `-m` | `--reasoning` | `~/.hermes/provider_models_cache.json` |
@@ -57,3 +58,5 @@ sent.
   `AM_CLAUDE_MODEL_PROBE=0` turns it off). A server you start by hand, a local
   install or a test server does not probe, and offers the aliases. Sessions
   never inherit the variable, and the test runner forces it to `0`.
+
+With `HF_TOKEN`, pi and opencode default to `huggingface/moonshotai/Kimi-K3.1-Pro` unless a model is selected. Without it, each CLI chooses its own default.

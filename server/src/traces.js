@@ -377,7 +377,7 @@ const ocText = (m) => Array.isArray(m.content)
   ? m.content.filter((c) => c && c.type === 'text' && c.text).map((c) => c.text).join(' ')
   : (typeof m.content === 'string' ? m.content : '');
 
-function parseOpenClaw(txt) {
+function parseOpenClaw(txt, pi = false) {
   const st = emptyStats();
   const dg = emptyDigest();
   st.files = 1;
@@ -385,20 +385,23 @@ function parseOpenClaw(txt) {
     if (!line) continue;
     let j; try { j = JSON.parse(line); } catch { continue; }
     if (j.timestamp) addTs(st, j.timestamp);
+    if (pi && j.type === 'session' && j.cwd) st.cwd = j.cwd;
     if (j.type !== 'message' || !j.message) continue;
     const m = j.message;
     const text = ocText(m);
     if (m.role === 'user') {
+      if (pi) dg.running = true;
       st.prompts++;
       if (text.trim() && !text.trim().startsWith('<')) digestPrompt(dg, text, j.timestamp);
     } else if (m.role === 'assistant') {
+      if (pi && m.stopReason) dg.running = m.stopReason === 'toolUse';
       st.turns++;
       dg.sinceTurns++;
       if (text.trim()) digestAssistant(dg, text, j.timestamp);
       const u = m.usage;
       if (u) {
         const cached = u.cacheRead || 0;
-        st.tokensIn += Math.max(0, (u.input || 0) - cached);
+        st.tokensIn += pi ? (u.input || 0) : Math.max(0, (u.input || 0) - cached);
         st.cacheRead += cached;
         st.tokensOut += u.output || 0;
         dg.sinceTokens += (u.input || 0) + (u.output || 0);
@@ -409,13 +412,28 @@ function parseOpenClaw(txt) {
             st.toolCalls++;
             const name = cb.name || cb.toolName || 'tool';
             st.tools[name] = (st.tools[name] || 0) + 1;
-            digestTool(dg, name, null);
+            digestTool(dg, name, pi ? (cb.arguments?.path || cb.arguments?.file_path || null) : null);
           }
         }
       }
     }
   }
   return { stats: st, digest: dg };
+}
+
+// pi uses the same v3 records, but its input excludes cache reads.
+function parsePi(txt) { return parseOpenClaw(txt, true); }
+const piRoot = () => path.join(process.env.PI_CODING_AGENT_DIR || path.join(process.env.HOME || '', '.pi', 'agent'), 'sessions');
+function piFiles() { return memoList('pi', piFilesUncached); }
+async function piFilesUncached() {
+  const root = piRoot(); const out = [];
+  let dirs = []; try { dirs = await fsp.readdir(root, { withFileTypes: true }); } catch { return out; }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    let files = []; try { files = await fsp.readdir(path.join(root, d.name)); } catch { continue; }
+    for (const f of files) if (f.endsWith('.jsonl')) out.push(path.join(root, d.name, f));
+  }
+  return out;
 }
 
 function openclawFiles() {
@@ -1222,7 +1240,7 @@ async function statsFor(p, parser, quietMs = 0) {
   return parsed;
 }
 
-const PARSERS = { claude: parseClaude, codex: parseCodex, openclaw: parseOpenClaw, fx: parseFx };
+const PARSERS = { pi: parsePi, claude: parseClaude, codex: parseCodex, openclaw: parseOpenClaw, fx: parseFx };
 const PARSER_KIND = new Map(Object.entries(PARSERS).map(([k, fn]) => [fn, k]));
 
 /** Read and parse one transcript, start to finish. Runs on a trace-parse
@@ -1564,6 +1582,14 @@ async function buildImpl() {
     attribute(session, parsed);
   }
 
+  const byPiUuid = new Map(sessions.filter((s) => s.cli === 'pi' && s.sessionUuid).map((s) => [s.sessionUuid, s]));
+  for (const p of await piFiles()) {
+    seenFiles.add(p);
+    const m = path.basename(p).match(UUID_RE);
+    attribute(m ? byPiUuid.get(m[1]) : null, await statsFor(p, parsePi));
+    await yieldLoop();
+  }
+
   // OpenClaw: every pane shares the ONE embedded agent (agent "main"), so its
   // traces belong to the single OpenClaw session when unambiguous, else other.
   const ocSessions = sessions.filter((s) => s.cli === 'openclaw');
@@ -1711,6 +1737,10 @@ export async function digestFor(s) {
     // A remote agent's conversation IS its message folder — nothing to parse,
     // and no transcript on this machine to find.
     if (isRemote(s.cli)) return remoteDigest(s);
+    if (s.cli === 'pi' && s.sessionUuid) {
+      const p = (await piFiles()).find((p) => path.basename(p).endsWith(`_${s.sessionUuid}.jsonl`));
+      if (p) return (await statsFor(p, parsePi))?.digest || null;
+    }
     if (s.cli === 'claude' && s.sessionUuid) {
       let best = null;
       for (const p of await claudeFiles()) {
@@ -1746,6 +1776,10 @@ export async function digestFor(s) {
  *  might belong to a sibling. */
 export async function traceLocation(s) {
   try {
+    if (s.cli === 'pi' && s.sessionUuid) {
+      const p = (await piFiles()).find((p) => path.basename(p).endsWith(`_${s.sessionUuid}.jsonl`));
+      return p ? { format: 'jsonl', path: p } : null;
+    }
     if (s.cli === 'claude' && s.sessionUuid) {
       for (const p of await claudeFiles()) {
         if (path.basename(p).includes(s.sessionUuid)) return { format: 'jsonl', path: p };
@@ -2523,6 +2557,32 @@ async function normalizeOpenClaw(file, out, range) {
   }
 }
 
+async function normalizePi(file, out, range) {
+  const stitch = makeStitcher();
+  for await (const j of jsonLines(file, range)) {
+    if (j.type === 'session') { out.cwd = j.cwd || out.cwd; out.sessionId = out.sessionId || j.id; continue; }
+    if (j.type === 'model_change') { out.model = j.modelId || out.model; continue; }
+    if (j.type !== 'message' || !j.message) continue;
+    const m = j.message;
+    if (m.role === 'system') continue;
+    if (m.role === 'toolResult') {
+      const res = { type: 'tool_result', id: m.toolCallId, ...capText(flattenToolContent(m.content)), failed: !!m.isError };
+      if (!stitch.file(res.id, res)) out.push({ role: 'assistant', blocks: [res] });
+      continue;
+    }
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    const msg = { role: m.role, ts: j.timestamp ? Date.parse(j.timestamp) || undefined : undefined, blocks: [] };
+    if (m.model) { msg.model = m.model; out.model = m.model; }
+    if (m.usage) msg.usage = { in: m.usage.input || 0, out: m.usage.output || 0, cacheRead: m.usage.cacheRead || 0 };
+    for (const c of Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }]) {
+      if (c.type === 'toolCall') { const use = { type: 'tool_use', id: c.id, name: c.name || 'tool', ...capText(c.arguments) }; msg.blocks.push(use); stitch.register(use, msg); }
+      else if (c.type === 'thinking' && c.thinking) msg.blocks.push(textBlock('thinking', c.thinking));
+      else if (c.type === 'text' && c.text) msg.blocks.push(textBlock('text', c.text));
+    }
+    if (msg.blocks.length) out.push(msg);
+  }
+}
+
 // STS (Session Trace Simple Format) — what share-session.mjs emits for the
 // converted harnesses, so accepted bundles from hermes/opencode/openclaw come
 // back through this one reader.
@@ -2779,6 +2839,8 @@ async function sniffHarness(file) {
 }
 
 async function sniffHarnessUncached(file) {
+  const relative = path.relative(piRoot(), path.resolve(file));
+  if (relative && !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative)) return 'pi';
   let n = 0;
   for await (const j of jsonLines(file)) {
     if (j.type === 'session' && j.harness) return 'sts';
@@ -2850,6 +2912,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
   switch (harness) {
     case 'claude': await normalizeClaude(file, out, range, allowSubagent); break;
     case 'codex': await normalizeCodex(file, out, range, allowSubagent); break;
+    case 'pi': await normalizePi(file, out, range); break;
     case 'openclaw': await normalizeOpenClaw(file, out, range); break;
     case 'fx': await normalizeFx(file, out, range); break;
     case 'sts': await normalizeSts(file, out, range); break;
@@ -3260,7 +3323,8 @@ async function serveTrace({ key, harness, file, sessionId, size, stat, decorate,
  * ambiguity refusal and codex subagent rollouts. Do not reimplement it.
  */
 export async function readTrace(session, opts = {}) {
-  const hit = await findTrace(session, store.list());
+  const loc = session.cli === 'pi' ? await traceLocation(session) : null;
+  const hit = loc ? { src: loc.path } : await findTrace(session, store.list());
   if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
 
   const st = await statRetry(hit.src);

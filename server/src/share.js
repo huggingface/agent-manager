@@ -453,7 +453,7 @@ export async function findTrace(session, allSessions = []) {
 // listing it here would ship a Share button that always fails. Its trace still
 // resolves through findTrace() for the reader.
 export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
-export const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
+export const HARNESS_LABEL = { pi: 'pi', claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
                                opencode: 'opencode', openclaw: 'OpenClaw', fx: 'fx', antigravity: 'Antigravity CLI' };
 
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */

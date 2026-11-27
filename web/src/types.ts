@@ -85,6 +85,7 @@ export interface LaunchOptions {
     id: string;
     model: boolean;
     models: LaunchModel[];
+    defaultModel?: string | null;
     /** CLI-wide effort values; null when they follow the model (perModelEfforts). */
     efforts: string[] | null;
     perModelEfforts: boolean;

@@ -107,6 +107,7 @@ function providerUsage(prov) {
     if (prov === 'openclaw' && process.env.OPENCLAW_STATE_DIR) {
       args.push('--open-claw-path', process.env.OPENCLAW_STATE_DIR);
     }
+    if (prov === 'pi' && process.env.PI_CODING_AGENT_DIR) args.push('--pi-agent-dir', process.env.PI_CODING_AGENT_DIR);
     let out;
     try {
       ({ stdout: out } = await execFile(
@@ -267,6 +268,7 @@ async function debugInfo() {
       claude: await raw('claude'),
       codex: await raw('codex'),
       opencode: await raw('opencode'),
+      pi: await raw('pi'),
       hermes: await raw('hermes'),
       openclaw: await raw('openclaw'),
       gemini: await raw('gemini'),
@@ -283,10 +285,11 @@ async function buildUsageImpl(debug = false, only = null) {
   // parallel and render whichever answers first — one slow/hung provider
   // (ccusage has a 20s timeout) no longer blocks the rest.
   const wants = (p) => !only || only === p;
-  const [uClaude, uCodex, uOpencode, uHermes, uOpenclaw, uGemini, qClaude, qCodex] = await Promise.all([
+  const [uClaude, uCodex, uOpencode, uPi, uHermes, uOpenclaw, uGemini, qClaude, qCodex] = await Promise.all([
     wants('claude') ? providerUsage('claude') : null,
     wants('codex') ? providerUsage('codex') : null,
     wants('opencode') ? providerUsage('opencode') : null,
+    wants('pi') ? providerUsage('pi') : null,
     wants('hermes') ? providerUsage('hermes') : null,
     wants('openclaw') ? providerUsage('openclaw') : null,
     wants('gemini') ? providerUsage('gemini') : null,
@@ -300,6 +303,7 @@ async function buildUsageImpl(debug = false, only = null) {
   // it has no single subscription quota: the underlying provider depends on
   // the model selected for each session.
   if (wants('opencode')) providers.opencode = { ...(uOpencode || {}), quota: null };
+  if (wants('pi')) providers.pi = { ...(uPi || {}), quota: null };
   if (wants('hermes')) providers.hermes = { ...(uHermes || {}), quota: null };
   if (wants('openclaw')) providers.openclaw = { ...(uOpenclaw || {}), quota: null };
   if (wants('gemini')) providers.gemini = { ...(uGemini || {}), quota: null };

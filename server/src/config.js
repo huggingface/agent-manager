@@ -220,6 +220,7 @@ const join = (...parts) => parts.filter(Boolean).join(' ');
 const withFlags = (base, f = '') => (f ? `${base} ${f}` : base);
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const AGY_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']; // `agy --help`, 1.4.10
+const PI_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const HERMES_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const OPENCLAW_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'];
 
@@ -348,7 +349,15 @@ export const CLIS = [
     withPrompt: (q, _images, f) => `${withFlags('opencode', f)} --prompt ${q}`,
     launch: { model: true, flags: ({ model }) => join(model && `-m ${shq(model)}`) },
     npm: 'opencode-ai',
-    secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
+    secrets: ['HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'], setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
+  { id: 'pi', label: 'pi', bin: 'pi', color: '#d08a6d', resizeMode: 'repaint',
+    run: (f) => withFlags('pi --tui-mode regular --approve', f),
+    resume: (id, f) => withFlags(`pi --tui-mode regular --approve --session-id ${id}`, f),
+    withPrompt: (q, images = [], f) => join(withFlags('pi --tui-mode regular --approve', f), ...images.map((i) => `@${i}`), q),
+    launch: { model: true, efforts: PI_EFFORTS, flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--thinking ${shq(effort)}`) },
+    npm: '@earendil-works/pi-coding-agent',
+    secrets: ['HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY'],
+    setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY') },
   // Model ids are `<provider>/<model>` as listed from Hermes' own cache, and
   // the model part may hold a slash itself (huggingface/moonshotai/Kimi-K2.5),
   // so they are passed as --provider and -m separately. Flags go BEFORE -c,
@@ -402,10 +411,13 @@ export const CLIS = [
  * are re-checked against the safe shapes (a hand-edited sessions.json must not
  * reach a shell), and a value the CLI cannot take is dropped.
  */
+export const defaultLaunchModel = (cli, env = process.env) =>
+  ['pi', 'opencode'].includes(cli) && env.HF_TOKEN?.trim() ? 'huggingface/moonshotai/Kimi-K3.1-Pro' : '';
+
 export function launchChoice(session) {
   const spec = cliById(session?.cli)?.launch;
   if (!spec) return { model: '', effort: '' };
-  const model = spec.model && typeof session.model === 'string' && LAUNCH_MODEL.test(session.model) ? session.model : '';
+  const model = spec.model && typeof session.model === 'string' && LAUNCH_MODEL.test(session.model) ? session.model : defaultLaunchModel(session.cli);
   const effort = spec.efforts && typeof session.effort === 'string' && LAUNCH_EFFORT.test(session.effort) ? session.effort : '';
   return { model, effort };
 }
@@ -441,10 +453,14 @@ function isConfigured(id) {
       return hasEnv('GEMINI_API_KEY');
     case 'opencode': {
       const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
-      return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
+      return hasEnv('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
         || fileOk(path.join(home, '.local', 'share', 'opencode', 'auth.json')) // pre-1.x
         || fileOk(path.join(xdgConfig, 'opencode', 'opencode.jsonc'))          // 1.x user config
         || fileOk(path.join(xdgConfig, 'opencode', 'opencode.json'));
+    }
+    case 'pi': {
+      if (hasEnv('HF_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_OAUTH_TOKEN', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY')) return true;
+      try { const auth = JSON.parse(fs.readFileSync(path.join(env.PI_CODING_AGENT_DIR || path.join(home, '.pi', 'agent'), 'auth.json'), 'utf8')); return !!auth && typeof auth === 'object' && Object.keys(auth).length > 0; } catch { return false; }
     }
     case 'hermes':
       // HF_TOKEN: hermes has a huggingface provider (HF router models).

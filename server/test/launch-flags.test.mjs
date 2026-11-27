@@ -42,7 +42,7 @@ const stub = `#!/bin/sh
 for a in "$@"; do [ -n "$STUB_FAIL" ] && [ "$a" = "$STUB_FAIL" ] && exit 3; done
 exit 0
 `;
-for (const name of ['claude', 'codex', 'gemini', 'opencode', 'hermes', 'openclaw', 'fx', 'agy']) {
+for (const name of ['claude', 'codex', 'gemini', 'opencode', 'pi', 'hermes', 'openclaw', 'fx', 'agy']) {
   fs.writeFileSync(path.join(BIN, name), stub, { mode: 0o755 });
 }
 
@@ -238,4 +238,25 @@ test('openclaw: --thinking on both the onboarding and the ready path; no model',
 test('fx: never takes a flag', () => {
   const s = make('fx', { model: 'm', effort: 'high' });
   assert.deepEqual(launch(runner.commandFor(s)).calls, [['fx']]);
+});
+
+
+test('pi pins fresh and resumed panes and preserves explicit choices', () => {
+  const seeded = make('pi', { model: 'huggingface/moonshotai/Kimi-K3.1-Pro', effort: 'high', pendingPrompt: 'hello', pendingImagePaths: ['/tmp/a b.png'] });
+  const expected = ['pi', '--tui-mode', 'regular', '--approve', '--session-id', seeded.sessionUuid, '--model', seeded.model, '--thinking', 'high'];
+  assert.deepEqual(launch(runner.commandFor(seeded)).calls, [[...expected, '@/tmp/a b.png', 'hello']]);
+  assert.deepEqual(launch(runner.commandFor({ ...seeded, everStarted: true })).calls, [expected]);
+  assert.throws(() => runner.commandFor({ ...seeded, sessionUuid: 'bad;command' }));
+});
+
+test('HF defaults apply to pi and opencode only, with explicit choice taking precedence', () => {
+  const prior = process.env.HF_TOKEN;
+  process.env.HF_TOKEN = 'test';
+  for (const cli of ['pi', 'opencode']) {
+    assert.equal(config.launchChoice({ cli }).model, 'huggingface/moonshotai/Kimi-K3.1-Pro');
+    assert.equal(config.launchChoice({ cli, model: 'openai/example' }).model, 'openai/example');
+  }
+  delete process.env.HF_TOKEN;
+  assert.equal(config.launchChoice({ cli: 'pi' }).model, '');
+  if (prior !== undefined) process.env.HF_TOKEN = prior;
 });

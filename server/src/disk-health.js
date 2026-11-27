@@ -175,6 +175,7 @@ function adapterDirsFor(env, localDir) {
     env.CODEX_HOME || path.join(localDir, 'codex-home'),
     env.CLAUDE_CONFIG_DIR || path.join(localDir, 'agent-state', 'claude'),
     env.GEMINI_LIVE || path.join(localDir, 'agent-state', 'gemini-home', '.gemini'),
+    env.PI_CODING_AGENT_DIR || path.join(localDir, 'pi-agent'),
     env.OPENCLAW_STATE_DIR || path.join(localDir, 'oc-home', '.openclaw'),
     env.OPENCODE_LIVE || path.join(localDir, 'opencode-share'),
     env.HERMES_LIVE || path.join(localDir, 'hermes'),

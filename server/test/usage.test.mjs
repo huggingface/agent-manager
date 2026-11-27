@@ -22,6 +22,7 @@ fs.chmodSync(BIN, 0o755);
 process.env.PATH = TMP;
 process.env.AM_LOCAL = LOCAL;
 process.env.OPENCLAW_STATE_DIR = OPENCLAW;
+process.env.PI_CODING_AGENT_DIR = path.join(LOCAL, 'pi');
 // Own the HOME the shim decides against, so the decision is about the fixtures
 // and not about whatever ~/.hermes the machine running the test happens to have.
 const HOME_BLIND = path.join(TMP, 'home-blind');
@@ -41,11 +42,14 @@ try {
   const opencode = (await buildUsage(false, 'opencode')).providers.opencode;
   const hermes = (await buildUsage(false, 'hermes')).providers.hermes;
   const openclaw = (await buildUsage(false, 'openclaw')).providers.openclaw;
+  const pi = (await buildUsage(false, 'pi')).providers.pi;
   const calls = fs.readFileSync(CALLS, 'utf8').trim().split('\n').map((line) => line.split('\t').filter(Boolean));
   const call = (provider) => calls.find((row) => row[1] === provider) || [];
   const opencodeCall = call('opencode');
   const hermesCall = call('hermes');
   const openclawCall = call('openclaw');
+  const piCall = call('pi');
+  check('pi receives its explicit agent directory', piCall[piCall.indexOf('--pi-agent-dir') + 1] === process.env.PI_CODING_AGENT_DIR);
 
   check('OpenCode uses its ccusage provider command', opencodeCall[2] === 'daily');
   check('Hermes uses its ccusage provider command', hermesCall[2] === 'daily');
@@ -59,7 +63,7 @@ try {
   const clawPath = openclawCall.indexOf('--open-claw-path');
   check('OpenClaw receives its explicit local state path', clawPath >= 0 && openclawCall[clawPath + 1] === OPENCLAW);
 
-  for (const [name, got] of [['OpenCode', opencode], ['Hermes', hermes], ['OpenClaw', openclaw]]) {
+  for (const [name, got] of [['OpenCode', opencode], ['Hermes', hermes], ['OpenClaw', openclaw], ['pi', pi]]) {
     check(`${name} exposes today/week tokens`, got.tokensToday === 12345 && got.tokensWeek === 12345);
     check(`${name} exposes today/week estimated cost`, got.costToday === 0.4567 && got.costWeek === 0.4567);
     check(`${name} does not invent a subscription quota`, got.quota === null);

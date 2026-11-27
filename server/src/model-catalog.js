@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { CLIS, cliById, STATE_DIR, WORKSPACES_DIR, LAUNCH_MODEL, LAUNCH_EFFORT, cliCatalog, agyCommand } from './config.js';
+import { CLIS, cliById, STATE_DIR, WORKSPACES_DIR, LAUNCH_MODEL, LAUNCH_EFFORT, cliCatalog, agyCommand, defaultLaunchModel } from './config.js';
 import { ApiError } from './api-errors.js';
 import { scrapeClaudePicker, killGroup, CLAUDE_FAMILIES } from './claude-models.js';
 
@@ -114,6 +114,12 @@ export function parseOpencodeModels(stdout) {
   return String(stdout).split('\n').map((l) => l.trim()).filter((l) => /^[^\s/]+\/\S+$/.test(l)).map((id) => ({ id }));
 }
 
+export function parsePiModels(stdout) {
+  return String(stdout).split('\n').map((l) => l.trim().split(/\s+/))
+    .filter((row) => row.length >= 6 && row[0] !== 'provider' && /^(yes|no)$/.test(row[4]) && /^(yes|no)$/.test(row[5]) && LAUNCH_MODEL.test(`${row[0]}/${row[1]}`))
+    .map(([provider, model]) => ({ id: `${provider}/${model}` }));
+}
+
 /** `agy models`: `id<TAB>label` per line, after a "Fetching…" line on stderr. */
 export function parseAgyModels(stdout) {
   return String(stdout).split('\n').map((l) => l.replace(/\r$/, '').split('\t'))
@@ -178,6 +184,7 @@ const SOURCES = {
     const models = parseGeminiRegistry(await fs.promises.readFile(file, 'utf8')).map((id) => ({ id }));
     return { models, source: `gemini-cli bundle (${path.basename(file)})` };
   },
+  pi: async () => ({ models: parsePiModels(await runList('pi --list-models')), source: 'pi --list-models' }),
   opencode: async () => ({ models: parseOpencodeModels(await runList('opencode models')), source: 'opencode models' }),
   antigravity: async () => ({ models: parseAgyModels(await runList(agyCommand('models'))), source: 'agy models' }),
   hermes: async () => {
@@ -265,6 +272,7 @@ export function launchOptions() {
         id: c.id,
         model: models.length > 0,
         models,
+        defaultModel: defaultLaunchModel(c.id) || null,
         // Per-model CLIs (codex) carry their levels on each model; the select
         // follows the chosen one. Otherwise one list for the whole CLI.
         efforts: perModel ? null : (c.launch.efforts || null),

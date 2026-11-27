@@ -1127,7 +1127,7 @@ export default function SettingsView({
         {page === 'skills' && (
           <div className="settings-page wide">
             <h2>Skills</h2>
-            <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
+            <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, pi, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
             <LazyPanel load={loadSkills} what="the skills editor" render={(m) => <m.default />} />
           </div>
         )}
