@@ -208,7 +208,7 @@ def error_facts(e):
     status = getattr(getattr(e, "response", None), "status_code", None)
     status = str(status) if isinstance(status, int) and 100 <= status <= 599 else "unknown"
     request_id = getattr(e, "request_id", None)
-    request_id = request_id if isinstance(request_id, str) and re.fullmatch(r"[a-fA-F0-9-]{8,64}", request_id) else "unknown"
+    request_id = request_id if isinstance(request_id, str) and re.fullmatch(r"(?:[a-fA-F0-9-]{8,64}|Root=1-[a-fA-F0-9]{8}-[a-fA-F0-9]{24}(?:;[a-fA-F0-9-]{8,64})?)", request_id) else "unknown"
     return "type=" + cls + " status=" + status + " request_id=" + request_id
 
 def safe_exception(exc_type, exc, tb):
@@ -561,7 +561,7 @@ export function parseBackupLogs(out) {
   // Only the Job's controlled refusal is safe to persist. Other exceptions can
   // contain arbitrary Hub response bodies, including token values.
   const refusal = [...lines].reverse().find((l) => l.startsWith('refusing to commit:')
-    || /^refusing to back up: (?:staging bucket is the source bucket|(?:bucket|dataset) [A-Za-z0-9._-]+\/[A-Za-z0-9._-]+ is not private|step=(?:initialization|install|privacy|staging|list|snapshot|sync|scrub|verify|commit) type=[A-Za-z][A-Za-z0-9_]{0,79} status=(?:unknown|[1-5][0-9]{2}) request_id=(?:unknown|[a-fA-F0-9-]{8,64}))$/.test(l));
+    || /^refusing to back up: (?:staging bucket is the source bucket|(?:bucket|dataset) [A-Za-z0-9._-]+\/[A-Za-z0-9._-]+ is not private|step=(?:initialization|install|privacy|staging|list|snapshot|sync|scrub|verify|commit) type=[A-Za-z][A-Za-z0-9_]{0,79} status=(?:unknown|[1-5][0-9]{2}) request_id=(?:unknown|[a-fA-F0-9-]{8,64}|Root=1-[a-fA-F0-9]{8}-[a-fA-F0-9]{24}(?:;[a-fA-F0-9-]{8,64})?))$/.test(l));
   return { gitFoldersSkipped, reason: refusal ? refusal.slice(0, 300) : null };
 }
 
