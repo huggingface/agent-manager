@@ -68,11 +68,9 @@ the bucket, ever.
    that makes it nearly free. The dataset is where thousands of env files actually
    hurt — every one of them gets hashed on every run — so that is where they are
    skipped.
-10. **Skip tokens are folder names, expanded server-side.** A bare name becomes
-   both `name/**` and `**/name/**`, because the second does not imply the first
-   (§3.8). Tokens are validated to hold no whitespace or shell characters: they
-   cross into the Job as one space-joined env var and the shell splits them back
-   apart, so the charset is what makes that split exact.
+10. **Skip tokens match path segments in the Job.** They are not globs.
+   Tokens contain no whitespace or shell characters and cross into the Job as
+   one space-joined environment variable.
 11. **Restore is a documented script, not a button** (§8).
 
 ## 2. What we already have
@@ -199,7 +197,7 @@ saving is larger than this.
 **The list ships prepopulated.** An install that has never set one gets
 `node_modules`, `.venv`, `venv`, `__pycache__`, `.cache`, `.npm`, `.pnpm-store`,
 `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, `.next`,
-`.turbo` — every one of them rebuilt on demand by a package manager or toolchain.
+`.turbo` and `.config/google-chrome-for-testing`. Most are rebuilt on demand; Chrome crash dumps are excluded because they can contain credentials. Crash Reports and Crashpad directories are always skipped, including for saved skip lists.
 
 The names came from walking this Space's own bucket, not from taste. Across 24
 workspace folders: 11 `node_modules`, 6 `.venv`, 4 `.cache`, plus a `$HOME/.cache`
@@ -452,9 +450,8 @@ live rather than remembering.
 
 - **The timer records how each run ended**, once per job id, into
   `backup-state.json`: stage, the platform's message, and one line of reason
-  lifted from the Job's own logs. That is where "cannot update files under a
-  '.cache/' folder" comes from — the platform only says `Job timeout`, which tells
-  an operator nothing about what to do.
+  selected from controlled, token-free Job refusals. Other exception text is not
+  persisted. The banner falls back to the platform message when no reason exists.
 - **`/api/info` carries a health object**, or null when all is well. It is read
   from state, never the Hub, because every open tab polls that route every 15
   seconds. Withheld while the Space is public, like `secrets`.
@@ -498,10 +495,10 @@ and TruffleHog verifies its find by authenticating with the token, which
 Hence §7.2.
 
 Measured end to end at prod scale: list 8.3 s → snapshot 12 s → download 129 s →
-scrub 2 s → verify → commit 113 s. **4m24s total**, for a job that had never once
+text-only scrub 2 s → verify → commit 113 s. **4m24s total**, for a job that had never once
 succeeded.
 
-## 7.2 Secrets never reach the history
+## 7.2 Scrubbing secrets before the history
 
 Two mechanisms, because either alone is insufficient:
 
@@ -510,6 +507,12 @@ Two mechanisms, because either alone is insufficient:
   `/.credentials.json` — that gap put a credentials file into a probe commit.
 - **Scrub** stray occurrences in all files with same-length filler, then **verify**, then commit. The
   verify is mandatory: if anything still matches, the run ends with no commit.
+
+The searchable same-length marker is logged with altered paths; binary checksums
+and indexes may break. UTF-16, base64 and tokens adjacent to hyphens are not
+covered by these patterns and may still be refused by the Hub. Staging is
+removed before and after each run, must differ from the source (case-insensitively),
+and the downloaded snapshot is checked for unexpected files.
 
 Patterns are boundary-anchored. A looser `sk-[A-Za-z0-9_-]{24,}` matched
 `sk-abstraction-and-chart-selection` inside ordinary prose — a scrub that silently
@@ -557,6 +560,9 @@ The direction the Hub *does* support server-side, pleasingly:
 hf cp hf://buckets/<mirror>/latest/ hf://buckets/<live>/       # instant, whole bucket
 hf cp hf://datasets/<dataset>/      hf://buckets/<live>/       # from a version
 ```
+
+Restored files marked as altered may be unreadable, especially binaries with
+checksums or indexes; check the Job log for their paths.
 
 repo→bucket is supported (§3.1), so restoring a specific commit's contents is
 also server-side. Both are **documented but untested** (§10.5).

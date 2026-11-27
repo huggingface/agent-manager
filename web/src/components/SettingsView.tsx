@@ -908,8 +908,8 @@ export default function SettingsView({
                       <span>
                         Skip these folders — type a name and press Enter. Anywhere they appear
                         (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
-                        they stay out of the history. Everything here is something a command puts
-                        back; nothing is skipped for being large. Remove any you want kept.
+                        they stay out of the history. This includes caches and Chrome crash dumps;
+                        nothing is skipped for being large. Remove any you want kept.
                       </span>
                       {/* The default list is long and picked from measurements, so an operator
                           who trims it has no way back without retyping 30 names. Hidden when

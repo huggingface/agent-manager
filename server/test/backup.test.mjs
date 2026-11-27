@@ -290,7 +290,7 @@ test('the commit is gated on a scrub that verified itself', () => {
   // The verify must come before the commit, or it proves nothing.
   assert.ok(JOB_SCRIPT.indexOf('secrets still present') < JOB_SCRIPT.indexOf('upload_folder'));
   // Tight patterns: a loose one rewrote ordinary prose containing "sk-".
-  assert.ok(JOB_SCRIPT.includes('(?<![A-Za-z0-9_-])'), 'secret patterns are boundary-anchored');
+  assert.ok(JOB_SCRIPT.includes('hf_(?<![A-Za-z0-9_-]hf_)'), 'secret patterns retain boundaries after literal prefixes');
   assert.ok(!JOB_SCRIPT.includes('sk-(?:proj-)?[A-Za-z0-9_-]{24,}'), 'the loose pattern is gone');
 });
 
@@ -310,7 +310,7 @@ test('an empty scope refuses rather than committing nothing', () => {
 // The default skip list: reproducibility is the only criterion.
 // ---------------------------------------------------------------------------
 
-test('defaults skip only what a command can put back', () => {
+test('defaults skip caches and sensitive crash dumps', () => {
   for (const t of ['node_modules', '.venv', '.cache', '__pycache__', '.lake/packages',
                    '.elan/toolchains', '.npm/_cacache', '.tmp']) {
     assert.ok(DEFAULT_EXCLUDE.includes(t), `${t} should be skipped by default`);

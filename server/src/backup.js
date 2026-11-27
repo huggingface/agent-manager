@@ -71,7 +71,7 @@ export const validRepoId = (s) => typeof s === 'string' && s.length <= 96 && ID_
 // hashes. Measured on 805 files: 7s without, 1s with them excluded — and a real
 // bucket's mount is slower than a local disk, so the saving is larger there.
 //
-// Tokens are folder names, or raw globs for anything finer. No whitespace and no
+// Tokens are matched as path segments, not globs. No whitespace and no
 // shell metacharacters: these are joined into one env var and split apart again
 // inside the Job, so the charset is what makes that split exact.
 const EXCLUDE_RE = /^[A-Za-z0-9._*?/-]+$/;
@@ -80,9 +80,9 @@ export const MAX_EXCLUDES = 40;
 /**
  * What a fresh install skips until the operator says otherwise.
  *
- * One criterion, and it is not size: **a command can put it back**. Everything
- * here is owned by a package manager, a toolchain installer, a cache or a temp
- * dir. Nothing is excluded for being large — a 292 MB session transcript is the
+ * Most entries are caches or dependencies that a command can put back. Chrome
+ * crash dumps are also excluded because they can contain process credentials.
+ * Nothing is excluded for being large — a 292 MB session transcript is the
  * most history-shaped thing on the bucket, and an earlier draft of this list
  * dropped it to a per-file size cap, which was wrong.
  *
@@ -171,7 +171,7 @@ export async function defaultsFor() {
   if (!ns) return { dataset: '', staging: '' };
   return {
     dataset: `${ns}/${spaceName()}-backup`,
-    // Ephemeral: created private at the start of a run, deleted at the end of it.
+    // Ephemeral: deleted and created private at the start, deleted again at the end.
     // A distinct name from the dataset so a half-finished run can never be
     // confused with the history, and so an operator's existing mirror bucket is
     // never written to by the new pipeline.
@@ -193,10 +193,27 @@ export const jobsUrl = () =>
 export const JOB_SCRIPT = `set -euo pipefail
 # Plain package, no [cli] extra: 1.26.0 dropped it and ships the CLI in the base
 # install. hf_xet speeds up the one leg that actually moves bytes.
-pip install -q "huggingface_hub[hf_xet]"
+if ! pip install -q "huggingface_hub[hf_xet]" 2>&1 | sed -uE 's/(hf_|api_org_)[A-Za-z0-9]{20,}/\\1[REDACTED]/g'; then
+    echo "refusing to back up: step=install type=InstallError status=unknown request_id=unknown"
+    exit 1
+fi
 
-python - <<'EOPY'
+python - <<'EOPY' 2>&1 | sed -uE 's/(hf_|api_org_)[A-Za-z0-9]{20,}/\\1[REDACTED]/g'
 import os, re, sys, time, collections, logging
+# Keep unhandled errors useful without printing response bodies or tracebacks.
+STEP = "initialization"
+def error_facts(e):
+    cls = type(e).__name__
+    cls = cls if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", cls) else "Error"
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    status = str(status) if isinstance(status, int) and 100 <= status <= 599 else "unknown"
+    request_id = getattr(e, "request_id", None)
+    request_id = request_id if isinstance(request_id, str) and re.fullmatch(r"[a-fA-F0-9-]{8,64}", request_id) else "unknown"
+    return "type=" + cls + " status=" + status + " request_id=" + request_id
+
+def safe_exception(exc_type, exc, tb):
+    sys.stderr.write("refusing to back up: step=" + STEP + " " + error_facts(exc) + "\\n")
+sys.excepthook = safe_exception
 from huggingface_hub import HfApi
 
 logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
@@ -226,11 +243,13 @@ def must_be_private(kind, rid):
     if getattr(info, "private", None) is not True:
         sys.exit("refusing to back up: " + kind + " " + rid + " is not private")
 
-if STAGING == SRC:
+if STAGING.lower() == SRC.lower():
     sys.exit("refusing to back up: staging bucket is the source bucket")
+STEP = "privacy"
 must_be_private("bucket", SRC)
 api.create_repo(DATASET, repo_type="dataset", private=True, exist_ok=True)
 must_be_private("dataset", DATASET)
+STEP = "staging"
 api.delete_bucket(STAGING, missing_ok=True)
 api.create_bucket(STAGING, private=True, exist_ok=True)
 must_be_private("bucket", STAGING)
@@ -250,6 +269,7 @@ try:
     # Over the API, never a mount. The mount costs ~8 ms per file: a stat-only
     # walk of this bucket took 14m51s for 108,960 files; the same tree lists in
     # 8 s here. That gap is the whole reason for this rewrite.
+    STEP = "list"
     t = time.time()
     entries = [f for f in api.list_bucket_tree(SRC, recursive=True) if hasattr(f, "size")]
     say("listed " + str(len(entries)) + " files in " + format(time.time() - t, ".1f") + "s")
@@ -268,7 +288,7 @@ try:
         "hosts.yml", "token", "stored_tokens", ".netrc", ".env", ".env.local",
         "id_rsa", "id_ed25519", "credentials",
     }
-    CRED_DIRS = ("/shell_snapshots/",)
+    CRED_DIRS = ("/shell_snapshots/", "/Crash Reports/", "/Crashpad/")
 
     def is_credential(path):
         if any(d in "/" + path for d in CRED_DIRS):
@@ -280,10 +300,10 @@ try:
     n_excl = n_cred = n_nohash = 0
     for f in entries:
         parts = f.path.split("/")
-        if ".git" in parts[:-1]:
-            git_dirs.add("/".join(parts[:parts.index(".git") + 1]))
-        elif excluded(f.path):
+        if excluded(f.path):
             n_excl += 1
+        elif ".git" in parts:
+            git_dirs.add("/".join(parts[:parts.index(".git") + 1]))
         elif is_credential(f.path):
             n_cred += 1
         elif not f.xet_hash:
@@ -303,6 +323,7 @@ try:
     # The snapshot is also what makes a run self-consistent. The live bucket is
     # written while we work, and reading it directly used to die with "not a file
     # on the local file system" when the Space rotated a file away mid-run.
+    STEP = "snapshot"
     t = time.time()
     for i in range(0, len(keep), 2000):
         api.batch_bucket_files(
@@ -314,26 +335,35 @@ try:
     # ------------------------------------------------------------ 4. sync local
     # Local disk, so the walk before the commit is free: 0.14 s for 39,873 files
     # against 14m51s for the same work on the mount.
+    STEP = "sync"
     os.makedirs(WORK, exist_ok=True)
     t = time.time()
     api.sync_bucket("hf://buckets/" + STAGING, WORK)
-    got = sum(len(fs) for _, _, fs in os.walk(WORK))
+    downloaded = {os.path.relpath(os.path.join(root, fn), WORK)
+                  for root, _, files in os.walk(WORK) for fn in files}
+    if downloaded - {f.path for f in keep}:
+        sys.exit("refusing to commit: staging contained unexpected files")
+    got = len(downloaded)
     say("downloaded " + str(got) + " files in " + format(time.time() - t, ".0f") + "s")
 
     # ---------------------------------------------------------------- 5. scrub
     # Tight patterns on purpose: a looser sk-[A-Za-z0-9_-]{24,} matched
     # "sk-abstraction-and-chart-selection" in ordinary prose, and a scrub that
     # rewrites real content is worse than one that over-reports.
-    BEF = "(?<![A-Za-z0-9_-])"
+    STEP = "scrub"
     AFT = "(?![A-Za-z0-9_-])"
     SECRETS = [
-        ("hf", re.compile((BEF + "hf_[A-Za-z0-9]{34}" + AFT).encode())),
-        ("openai", re.compile((BEF + "sk-(?:proj-)?[A-Za-z0-9]{20,}" + AFT).encode())),
-        ("anthropic", re.compile((BEF + "sk-ant-[A-Za-z0-9_-]{24,}" + AFT).encode())),
-        ("github", re.compile((BEF + "gh[pousr]_[A-Za-z0-9]{36}" + AFT).encode())),
-        ("aws", re.compile((BEF + "AKIA[0-9A-Z]{16}" + AFT).encode())),
-        ("google", re.compile((BEF + "AIza[0-9A-Za-z_-]{35}" + AFT).encode())),
+        ("hf", re.compile(("hf_(?<![A-Za-z0-9_-]hf_)[A-Za-z0-9]{34}" + AFT).encode())),
+        ("openai", re.compile(("sk-(?<![A-Za-z0-9_-]sk-)(?:proj-)?[A-Za-z0-9]{20,}" + AFT).encode())),
+        ("anthropic", re.compile(("sk-ant-(?<![A-Za-z0-9_-]sk-ant-)[A-Za-z0-9_-]{24,}" + AFT).encode())),
+        ("github", re.compile(("gh(?<![A-Za-z0-9_-]gh)[pousr]_[A-Za-z0-9]{36}" + AFT).encode())),
+        ("aws", re.compile(("AKIA(?<![A-Za-z0-9_-]AKIA)[0-9A-Z]{16}" + AFT).encode())),
+        ("google", re.compile(("AIza(?<![A-Za-z0-9_-]AIza)[0-9A-Za-z_-]{35}" + AFT).encode())),
     ]
+    def safe_path(path):
+        if any(rx.search(path.encode()) for _, rx in SECRETS):
+            return "[path withheld]"
+        return ascii(path)[1:-1]
     def allfiles():
         for root, _, fs in os.walk(WORK):
             for fn in fs:
@@ -347,12 +377,13 @@ try:
     for fp, data in allfiles():
         orig = data
         for name, rx in SECRETS:
-            data, k = rx.subn(lambda m: b"X" * len(m.group()), data)
+            data, k = rx.subn(lambda m: b"[REDACTED-SECRET]" + b"#" * (len(m.group()) - len(b"[REDACTED-SECRET]")), data)
             if k:
                 hits[name] += k
         if data != orig:
             open(fp, "wb").write(data)
             touched += 1
+            say("scrub: altered " + safe_path(os.path.relpath(fp, WORK)))
     say("scrub: redacted " + str(sum(hits.values())) + " secrets in " + str(touched)
         + " files " + str(dict(hits)) + " in " + format(time.time() - t, ".0f") + "s")
 
@@ -360,6 +391,7 @@ try:
     # Mandatory, not a nicety. The Hub's scanner is TruffleHog and it verifies a
     # find by authenticating with it, which INVALIDATES a live token. A commit
     # that leaks one does not merely fail: it breaks the operator's credentials.
+    STEP = "verify"
     left = sum(1 for _, d in allfiles() if any(rx.search(d) for _, rx in SECRETS))
     if left:
         sys.exit("refusing to commit: secrets still present in " + str(left) + " files")
@@ -368,6 +400,7 @@ try:
     # --------------------------------------------------------------- 7. commit
     # delete_patterns makes the newest commit match the scope, while every
     # earlier commit keeps since-removed files recoverable.
+    STEP = "commit"
     t = time.time()
     try:
         api.upload_folder(
@@ -378,10 +411,23 @@ try:
         # Only paths already in the snapshot can be reported. Never echo the
         # exception: Hub secret-scan errors include the actual token values.
         message = str(e)
-        paths = [f.path for f in keep if f.path in message
-                 and re.fullmatch(r"[A-Za-z0-9_./ -]+", f.path)
-                 and not any(rx.search(f.path.encode()) for _, rx in SECRETS)]
-        sys.exit("refusing to commit: " + (", ".join(paths[:5]) if paths else "Hub rejected upload; see job status"))
+        matches = []
+        for f in keep:
+            # A path must be bounded by quotes, whitespace or line ends; a
+            # substring of another path or URL is not an offending path.
+            boundary = " "+chr(9)+chr(10)+chr(13)+chr(34)+chr(39)
+            i = message.find(f.path)
+            while i >= 0:
+                end = i + len(f.path)
+                if (i == 0 or message[i - 1] in boundary) and (end == len(message) or message[end] in boundary):
+                    if not any(rx.search(f.path.encode()) for _, rx in SECRETS):
+                        matches.append((i, f.path))
+                    break
+                i = message.find(f.path, i + 1)
+        paths = [safe_path(p) for _, p in sorted(matches)]
+        suffix = ((" (+" + str(len(paths) - 5) + " more)") if len(paths) > 5 else "")
+        sys.exit("refusing to commit: " + error_facts(e) + " paths=" + str(len(paths))
+                 + (" " + ", ".join(paths[:5]) + suffix if paths else ""))
     say("committed to " + DATASET + " in " + format(time.time() - t, ".0f") + "s")
 finally:
     cleanup()
@@ -475,7 +521,7 @@ export async function runBackupNow(cfg) {
   for (const [label, id] of [['source', source], ['dataset', dataset], ['staging', staging]]) {
     if (!validRepoId(id)) throw new ApiError(400, 'invalid-input', `${label} is not a valid repo id`);
   }
-  if (staging === source) throw new ApiError(400, 'invalid-input', 'staging bucket must differ from source');
+  if (staging.toLowerCase() === source.toLowerCase()) throw new ApiError(400, 'invalid-input', 'staging bucket must differ from source');
   // Nothing is pre-created here. Both destinations are created explicitly
   // private INSIDE the Job and then read back before anything is written —
   // creating them from two places is how you end up trusting a default.
@@ -514,7 +560,8 @@ export function parseBackupLogs(out) {
   const gitFoldersSkipped = countLine ? Number(countLine.match(/^scope: skipped (\d+)/)[1]) : null;
   // Only the Job's controlled refusal is safe to persist. Other exceptions can
   // contain arbitrary Hub response bodies, including token values.
-  const refusal = [...lines].reverse().find((l) => l.startsWith('refusing to commit:'));
+  const refusal = [...lines].reverse().find((l) => l.startsWith('refusing to commit:')
+    || /^refusing to back up: (?:staging bucket is the source bucket|(?:bucket|dataset) [A-Za-z0-9._-]+\/[A-Za-z0-9._-]+ is not private|step=(?:initialization|install|privacy|staging|list|snapshot|sync|scrub|verify|commit) type=[A-Za-z][A-Za-z0-9_]{0,79} status=(?:unknown|[1-5][0-9]{2}) request_id=(?:unknown|[a-fA-F0-9-]{8,64}))$/.test(l));
   return { gitFoldersSkipped, reason: refusal ? refusal.slice(0, 300) : null };
 }
 
@@ -539,13 +586,13 @@ async function recordOutcome() {
   if (!stage || isActiveStage(stage)) return; // still running, or the Hub did not say
   const details = await backupLogDetails(st.jobId);
   if (stage === 'COMPLETED') {
-    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now(), gitFoldersSkipped: details.gitFoldersSkipped });
+    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now(), ...(details.gitFoldersSkipped == null ? {} : { gitFoldersSkipped: details.gitFoldersSkipped }) });
     return;
   }
   saveState({
     outcomeFor: st.jobId,
     failures: (st.failures || 0) + 1,
-    gitFoldersSkipped: details.gitFoldersSkipped,
+    ...(details.gitFoldersSkipped == null ? {} : { gitFoldersSkipped: details.gitFoldersSkipped }),
     lastFailure: { at: Date.now(), jobId: st.jobId, stage, message: message || null, reason: details.reason },
   });
   console.warn(`[backup] run ${st.jobId} ended ${stage}${message ? ` (${message})` : ''}`);

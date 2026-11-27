@@ -21,7 +21,7 @@ export default function BackupBanner({ health, onOpenSettings }: {
           <>
             <b>Bucket backup is failing.</b>{' '}
             {health.failures > 1 ? `${health.failures} runs in a row. ` : ''}
-            {health.reason ? <span className="mono bkfail-why">{health.reason}</span> : null}
+            {(health.reason || health.message) ? <span className="mono bkfail-why">{health.reason || health.message}</span> : null}
           </>
         ) : (
           <>
