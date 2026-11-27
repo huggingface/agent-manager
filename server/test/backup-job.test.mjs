@@ -6,6 +6,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { JOB_SCRIPT, DEFAULT_EXCLUDE, parseBackupLogs } from '../src/backup.js';
 
+const safeEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !/TOKEN|SECRET/i.test(key)));
+
 function runJob(fail = false, source = 'ns/source', options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-job-'));
   const work = path.join(dir, 'work');
@@ -44,7 +46,7 @@ class HfApi:
     assert.ok(JOB_SCRIPT.includes('WORK = "/work"'));
     const script = JOB_SCRIPT.replace('WORK = "/work"', `WORK = ${JSON.stringify(work)}`)
       .replace('pip install -q "huggingface_hub[hf_xet]"', ':');
-    const env = { ...process.env, PYTHONPATH: dir, AM_SOURCE: source, AM_DATASET: 'ns/dataset', AM_STAGING: 'ns/staging', AM_EXCLUDE: 'node_modules', HF_HUB_OFFLINE: '1', HF_HOME: dir };
+    const env = { ...safeEnv(), PYTHONPATH: dir, AM_SOURCE: source, AM_DATASET: 'ns/dataset', AM_STAGING: 'ns/staging', AM_EXCLUDE: 'node_modules', HF_HUB_OFFLINE: '1', HF_HOME: dir };
     for (const key of Object.keys(env)) if (key.includes('TOKEN') || key.includes('SECRET')) delete env[key];
     const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env });
     return { ...result, fakeToken };
@@ -91,7 +93,7 @@ test('a failed Job records only its safe refusal and skipped folder count', asyn
   fs.writeFileSync(path.join(dir, 'hf'), `#!/bin/sh\nif [ "$2" = inspect ]; then echo '{"status":{"stage":"ERROR","message":"Job failed"}}'; else printf '%s' '${logs}'; fi\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, 'backup-state.json'), JSON.stringify({ jobId: 'job1', startedAt: Date.now() }));
   const code = `import { tick } from ${JSON.stringify(new URL('../src/backup.js', import.meta.url).href)}; await tick({backup:{every:'never'}});`;
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, PATH: dir + ':' + process.env.PATH, DATA_DIR: dir, HF_TOKEN: 'fake', AM_BACKUP_SOURCE: 'ns/source' } });
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...safeEnv(), HF_HUB_OFFLINE: '1', HF_HOME: dir, PATH: dir + ':' + process.env.PATH, DATA_DIR: dir, HF_TOKEN: 'fake', AM_BACKUP_SOURCE: 'ns/source' } });
   assert.equal(r.status, 0, r.stderr);
   const state = fs.readFileSync(path.join(dir, 'backup-state.json'), 'utf8');
   assert.equal(JSON.parse(state).lastFailure.reason, 'refusing to commit: data/dump.bin');
@@ -135,7 +137,7 @@ const status=await backupStatus({backup:{every:'never',dataset:'ns/dataset',stag
 console.log(JSON.stringify({count:status.gitFoldersSkipped}));
 try { await runBackupNow({backup:{dataset:'ns/dataset',staging:'NS/SOURCE'}}); process.exit(2); }
 catch(e) { if(e.statusCode!==400) throw e; }`;
-    const env = { ...process.env, PATH: dir + ':' + process.env.PATH, DATA_DIR: dir, HF_TOKEN: 'fake', AM_BACKUP_SOURCE: 'ns/source', FAKE_STAGE: 'COMPLETED', FAKE_LOG: 'scope: skipped 3 .git folders; push or use git bundle for local-only work' };
+    const env = { ...safeEnv(), HF_HUB_OFFLINE: '1', HF_HOME: dir, PATH: dir + ':' + process.env.PATH, DATA_DIR: dir, HF_TOKEN: 'fake', AM_BACKUP_SOURCE: 'ns/source', FAKE_STAGE: 'COMPLETED', FAKE_LOG: 'scope: skipped 3 .git folders; push or use git bundle for local-only work' };
     let r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /"count":3/);
