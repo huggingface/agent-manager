@@ -25,10 +25,8 @@ test('a config that never set a skip list gets the default, an emptied one stays
   assert.deepEqual(excludeFromConfig('node_modules'), []);
 });
 
-test('the default skip list is caches only — never .git, never ambiguous build dirs', () => {
-  // .git is the most common folder in the bucket and the one most worth keeping.
-  // A size-ranked heuristic would pick it first, so pin it explicitly.
-  for (const keep of ['.git', 'dist', 'build', 'target', 'src', 'data', '.config', '.ssh']) {
+test('the default skip list keeps ambiguous build dirs', () => {
+  for (const keep of ['dist', 'build', 'target', 'src', 'data', '.config', '.ssh']) {
     assert.ok(!DEFAULT_EXCLUDE.includes(keep), `${keep} must not be skipped by default`);
   }
   // The names actually found in this Space's bucket are covered.
@@ -292,7 +290,7 @@ test('the commit is gated on a scrub that verified itself', () => {
   // The verify must come before the commit, or it proves nothing.
   assert.ok(JOB_SCRIPT.indexOf('secrets still present') < JOB_SCRIPT.indexOf('upload_folder'));
   // Tight patterns: a loose one rewrote ordinary prose containing "sk-".
-  assert.ok(JOB_SCRIPT.includes('(?<![A-Za-z0-9_-])'), 'secret patterns are boundary-anchored');
+  assert.ok(JOB_SCRIPT.includes('hf_(?<![A-Za-z0-9_-]hf_)'), 'secret patterns retain boundaries after literal prefixes');
   assert.ok(!JOB_SCRIPT.includes('sk-(?:proj-)?[A-Za-z0-9_-]{24,}'), 'the loose pattern is gone');
 });
 
@@ -312,17 +310,14 @@ test('an empty scope refuses rather than committing nothing', () => {
 // The default skip list: reproducibility is the only criterion.
 // ---------------------------------------------------------------------------
 
-test('defaults skip only what a command can put back', () => {
+test('defaults skip caches and sensitive crash dumps', () => {
   for (const t of ['node_modules', '.venv', '.cache', '__pycache__', '.lake/packages',
                    '.elan/toolchains', '.npm/_cacache', '.tmp']) {
     assert.ok(DEFAULT_EXCLUDE.includes(t), `${t} should be skipped by default`);
   }
 });
 
-test('defaults never drop work: no .git, no worktrees, no size rule', () => {
-  // .git holds unpushed commits and staged changes: they exist nowhere else.
-  assert.ok(!DEFAULT_EXCLUDE.includes('.git'));
-  assert.ok(!DEFAULT_EXCLUDE.some((t) => t.includes('.git')));
+test('defaults keep worktrees and have no size rule', () => {
   // Ambiguous build names stay opt-in — a source folder is called `build` often.
   for (const t of ['dist', 'build', 'target']) assert.ok(!DEFAULT_EXCLUDE.includes(t));
   // And nothing anywhere decides by file size.

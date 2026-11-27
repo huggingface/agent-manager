@@ -114,3 +114,10 @@ test('App loads the banners on demand, not in the entry', () => {
   assert.doesNotMatch(app, /^import .*(BackupBanner|CheckpointBanner|DiskBanner|HealthBanners)/m);
   assert.match(app, /\(info\?\.backup \|\| info\?\.checkpoint \|\| info\?\.disk\) && <Suspense>/);
 });
+
+test('backup failure shows the platform message if the controlled reason is unavailable', () => {
+  const health = { failing: true, failures: 1, reason: null, message: 'Job timeout', jobsUrl: 'https://example.test/jobs' };
+  assert.match(render(null, health), /Job timeout/);
+  assert.match(render(null, { ...health, reason: 'refusing to commit: paths=1 file' }), /refusing to commit: paths=1 file/);
+  assert.doesNotMatch(render(null, { ...health, reason: 'refusing to commit: paths=1 file' }), /Job timeout/);
+});
